@@ -28,6 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / ".release_cache"
 EMBED_ZIP = CACHE / "python-3.11.9-embed-amd64.zip"
+EMBED_DIR = CACHE / "python-3.11.9-embed-amd64"
 WHEELS = CACHE / "wheels"
 
 # Heavy Qt pieces the application never links against; dropping them keeps the
@@ -132,11 +133,44 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _extract_embed(target: Path) -> None:
-    if not EMBED_ZIP.exists():
-        raise SystemExit(f"missing embeddable python: {EMBED_ZIP}")
-    with zipfile.ZipFile(EMBED_ZIP) as archive:
-        archive.extractall(target)
+# Files of the official python-3.11.9-embed-amd64 distribution (with sizes), used
+# to verify a re-assembled copy when the original zip is not available.
+EMBED_FILES = {
+    "LICENSE.txt": 36235, "_asyncio.pyd": 65304, "_bz2.pyd": 84760, "_ctypes.pyd": 124696,
+    "_decimal.pyd": 255768, "_elementtree.pyd": 128792, "_hashlib.pyd": 65304,
+    "_lzma.pyd": 159512, "_msi.pyd": 44824, "_multiprocessing.pyd": 34584,
+    "_overlapped.pyd": 51480, "_queue.pyd": 32024, "_socket.pyd": 79640,
+    "_sqlite3.pyd": 120600, "_ssl.pyd": 178456, "_uuid.pyd": 25368, "_zoneinfo.pyd": 45848,
+    "libcrypto-3.dll": 5191960, "libffi-8.dll": 39696, "libssl-3.dll": 787224,
+    "pyexpat.pyd": 199448, "python.cat": 643161, "python.exe": 103192, "python3.dll": 67352,
+    "python311.dll": 5800216, "python311.zip": 4285636, "pythonw.exe": 101656,
+    "select.pyd": 30488, "sqlite3.dll": 1540888, "unicodedata.pyd": 1140504,
+    "vcruntime140.dll": 119192, "vcruntime140_1.dll": 49528, "winsound.pyd": 31512,
+}
+
+
+def _extract_embed(target: Path) -> str:
+    """Materialise the embeddable CPython runtime and say where it came from."""
+    if EMBED_ZIP.exists():
+        with zipfile.ZipFile(EMBED_ZIP) as archive:
+            archive.extractall(target)
+        return str(EMBED_ZIP)
+    if not EMBED_DIR.exists():
+        raise SystemExit(f"missing embeddable python: {EMBED_ZIP} or {EMBED_DIR}")
+    missing = []
+    for name, expected_size in EMBED_FILES.items():
+        source = EMBED_DIR / name
+        if not source.exists():
+            missing.append(f"{name} (missing)")
+            continue
+        actual = source.stat().st_size
+        if actual != expected_size:
+            missing.append(f"{name} ({actual} != {expected_size})")
+            continue
+        shutil.copy2(source, target / name)
+    if missing:
+        raise SystemExit("embeddable python is incomplete: " + ", ".join(missing[:6]))
+    return str(EMBED_DIR)
 
 
 def _skip_wheel_member(name: str) -> bool:
@@ -223,7 +257,7 @@ def build(out: Path, zip_path: Path | None, zip_prefix: str = "") -> dict[str, o
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
-    _extract_embed(out)
+    embed_source = _extract_embed(out)
     _write_pth(out)
     _copy_tree(ROOT / "src", out / "src")
     for name in ("runtime", "ui_assets", "themes", "sample_data"):
@@ -236,7 +270,8 @@ def build(out: Path, zip_path: Path | None, zip_prefix: str = "") -> dict[str, o
     (out / "ПРОЧТИ_МЕНЯ.txt").write_text(PORTABLE_README, encoding="utf-8-sig")
     manifest: dict[str, object] = {
         "wheels": installed,
-        "python_embed_sha256": _sha256(EMBED_ZIP),
+        "python_embed_source": embed_source,
+        "python_embed_sha256": _sha256(Path(embed_source)) if Path(embed_source).is_file() else "",
     }
     (out / "BUILD_INFO.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if zip_path is not None:
