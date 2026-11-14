@@ -298,3 +298,18 @@ def test_convert_test_target_plain_ping_unchanged(manager: ProcessManager) -> No
 def test_convert_test_target_clamps_repeat(manager: ProcessManager) -> None:
     assert manager._convert_test_target("x", "REPEAT99:https://a.b")["repeat"] == "10"
     assert "repeat" not in manager._convert_test_target("x", "REPEAT1:https://a.b")
+
+
+def test_readiness_warning_respects_grace_period(manager: ProcessManager) -> None:
+    logged: list[str] = []
+    manager.logging.log = lambda level, message, **kwargs: logged.append(message)  # type: ignore[assignment]
+    process = _FakeProcess(pid=7, returncode=None)
+    manager._zapret_started_at = 100.0
+    manager._zapret_ready = False
+    # Inside the grace window nothing is reported: stdout may still be buffered.
+    manager._note_zapret_ready_state(process, now=105.0)  # type: ignore[arg-type]
+    assert logged == []
+    # After the grace window a live-but-idle winws is reported exactly once.
+    manager._note_zapret_ready_state(process, now=130.0)  # type: ignore[arg-type]
+    manager._note_zapret_ready_state(process, now=140.0)  # type: ignore[arg-type]
+    assert len(logged) == 1 and "did not report WinDivert capture" in logged[0]

@@ -42,6 +42,21 @@ class RuntimeDiagnostics:
         self._set_diagnostic_override = set_diagnostic_override
         self._diagnostic_runtime_override = False
 
+    def _zapret_running(self) -> bool:
+        """True only when *our* Zapret is up.
+
+        The callback receives the legacy ``image_name`` argument for backwards
+        compatibility but ProcessManager ignores it and inspects its own child,
+        so a leaked/third-party winws.exe no longer fakes a healthy state.
+        """
+        checker = getattr(self, "_is_image_running", None)
+        if checker is None:
+            return False
+        try:
+            return bool(checker("winws.exe"))
+        except TypeError:  # pragma: no cover - defensive for custom callbacks
+            return bool(checker())
+
     def _set_runtime_override(self, value: bool) -> None:
         self._diagnostic_runtime_override = value
         if self._set_diagnostic_override is not None:
@@ -54,6 +69,7 @@ class RuntimeDiagnostics:
             "zapret_ipset_mode": settings.zapret_ipset_mode,
             "zapret_game_filter_mode": settings.zapret_game_filter_mode,
             "zapret_udp_exclude_ports": settings.zapret_udp_exclude_ports,
+            "youtube_stability": bool(getattr(settings, "youtube_stability", True)),
         }
 
     def restore_diagnostic_settings(self, snapshot: dict[str, object]) -> None:
@@ -62,10 +78,11 @@ class RuntimeDiagnostics:
             zapret_ipset_mode=str(snapshot.get("zapret_ipset_mode", "loaded") or "loaded"),
             zapret_game_filter_mode=str(snapshot.get("zapret_game_filter_mode", "disabled") or "disabled"),
             zapret_udp_exclude_ports=str(snapshot.get("zapret_udp_exclude_ports", "51820") or "51820"),
+            youtube_stability=bool(snapshot.get("youtube_stability", True)),
         )
 
     def prepare_diagnostic_runtime(self, *, general_id: str, ipset_mode: str, game_mode: str) -> bool:
-        original_running = self._is_image_running("winws.exe")
+        original_running = self._zapret_running()
         if original_running:
             self._stop_component("zapret")
         self.settings.update(
@@ -163,7 +180,7 @@ class RuntimeDiagnostics:
     ) -> list[dict[str, object]]:
         options_map = {item["id"]: item for item in self._list_zapret_generals()}
         settings_snapshot = self.capture_diagnostic_settings()
-        original_running = self._is_image_running("winws.exe")
+        original_running = self._zapret_running()
         results: list[dict[str, object]] = []
         targets = targets if targets else self._load_standard_test_targets()
         total = max(1, len(batch))
@@ -243,7 +260,7 @@ class RuntimeDiagnostics:
         if not options:
             return []
         settings_snapshot = self.capture_diagnostic_settings()
-        original_running = self._is_image_running("winws.exe")
+        original_running = self._zapret_running()
         results: list[dict[str, str]] = []
         targets = self._load_standard_test_targets()
         per_general_steps = max(2, len(targets) + 1)
@@ -317,7 +334,7 @@ class RuntimeDiagnostics:
         combinations = [(ipset, game) for ipset in ipset_modes for game in game_modes]
         results: list[dict[str, object]] = []
         total = max(1, len(combinations))
-        original_running = self._is_image_running("winws.exe")
+        original_running = self._zapret_running()
         settings_snapshot = self.capture_diagnostic_settings()
         targets = self._load_standard_test_targets()
         check_fn = self._run_batch_connectivity_check or self._run_connectivity_check

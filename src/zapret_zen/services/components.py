@@ -216,7 +216,7 @@ class ProcessManager:
             logging, settings,
             stop_component=self.stop_component,
             start_component=self.start_component,
-            is_image_running=self._is_image_running,
+            is_image_running=self._is_zapret_running,
             list_zapret_generals=self.list_zapret_generals,
             build_zapret_args=self._build_zapret_args,
             load_standard_test_targets=self._load_standard_test_targets,
@@ -234,6 +234,21 @@ class ProcessManager:
             tg_running=self._tg_worker_alive,
             probe_tgws_worker=self.probe_tg_ws_proxy_worker,
         )
+
+    def _is_zapret_running(self, _image_name: str = "winws.exe") -> bool:
+        """Answer "is our Zapret up?" instead of "does some winws.exe exist?".
+
+        The diagnostics used ``tasklist`` for winws.exe, so a leaked or
+        third-party instance made the app think Zapret was already running: it
+        skipped starting its own process and reported a healthy state while
+        nothing was being desynced.
+        """
+        with self._process_lock:
+            process = self._processes.get("zapret")
+            if process is not None and process.poll() is None:
+                return True
+            state = self._states.get("zapret")
+            return bool(state is not None and state.status == "running")
 
     def _tg_worker_alive(self) -> bool:
         worker = self._processes.get("tg-ws-proxy")
@@ -600,23 +615,35 @@ class ProcessManager:
                 return True
             time.sleep(0.1)
 
-    def _note_zapret_ready_state(self, process: subprocess.Popen[Any]) -> None:
+    ZAPRET_READY_GRACE_SECONDS = 20.0
+
+    def _note_zapret_ready_state(self, process: subprocess.Popen[Any], *, now: float | None = None) -> None:
         """Warn once when a live winws never reported that capture started.
 
         This is the "process looks healthy but nothing is being desynced" case
-        that made single videos hang: winws alive, WinDivert idle.
+        behind hanging videos: winws alive, WinDivert idle (driver held by a
+        leaked instance, or the filter matched nothing).  It is only checked a
+        grace period after start so ordinary stdout buffering cannot trigger it.
         """
         if self._zapret_ready:
             return
         if self._read_zapret_ready():
             self._zapret_ready = True
             return
-        if process.poll() is None and not self._zapret_ready_warned:
-            self._zapret_ready_warned = True
-            self.logging.log(
-                "warning",
-                "winws is running but did not report WinDivert capture; check that another winws/WinDivert instance is not holding the driver",
-            )
+        clock = time.monotonic() if now is None else now
+        if self._zapret_started_at <= 0.0:
+            return
+        if clock - self._zapret_started_at < self.ZAPRET_READY_GRACE_SECONDS:
+            return
+        if process.poll() is not None:
+            return
+        if self._zapret_ready_warned:
+            return
+        self._zapret_ready_warned = True
+        self.logging.log(
+            "warning",
+            "winws is running but did not report WinDivert capture; check that another winws/WinDivert instance is not holding the driver",
+        )
 
     def supervise_zapret(self, *, now: float | None = None) -> ComponentState | None:
         """Restart an unexpectedly exited owned winws with a bounded backoff.
@@ -634,6 +661,7 @@ class ProcessManager:
             if process is not None and process.poll() is None:
                 while self._zapret_restart_attempts and clock - self._zapret_restart_attempts[0] > 60.0:
                     self._zapret_restart_attempts.popleft()
+                self._note_zapret_ready_state(process, now=clock)
                 return None
             if process is not None:
                 self._zapret_last_exit_code = process.poll()
@@ -756,7 +784,6 @@ class ProcessManager:
                 self._zapret_started_at = time.monotonic()
                 if not self._diagnostic_runtime_override:
                     self._zapret_desired_running = True
-                self._note_zapret_ready_state(process)
                 state = ComponentState(component_id=component_id, status="running", pid=process.pid)
                 self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0], pid=process.pid)
             else:
@@ -891,7 +918,6 @@ class ProcessManager:
                 self._zapret_started_at = time.monotonic()
                 if not self._diagnostic_runtime_override:
                     self._zapret_desired_running = True
-                self._note_zapret_ready_state(process)
                 state = ComponentState(component_id=component_id, status="running", pid=process.pid)
             else:
                 self._close_source_log_stream("zapret")
