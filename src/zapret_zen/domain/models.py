@@ -61,6 +61,7 @@ class AppSettings:
     zapret_game_filter_mode: str = "disabled"
     zapret_udp_exclude_ports: str = "51820"
     zapret_block_quic: bool = False
+    youtube_stability: bool = True
     selected_dns_preset: str = ""
     dns_custom_server: bool = False
     dns_custom_doh: str = ""

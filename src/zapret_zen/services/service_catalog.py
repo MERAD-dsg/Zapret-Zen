@@ -79,7 +79,7 @@ ALWAYS_APPLY_SERVICE_IDS: tuple[str, ...] = ("cloudflare", "clouds")
 
 SERVICE_PRESETS: tuple[ServicePreset, ...] = (
     ServicePreset("discord", "Discord", "Discord", "Голосовой чат, сообщения и медиа Discord", "Voice chat, messaging, and Discord media", "discord.svg", "#5865f2", "Голосовой чат, сообщения и медиа", "Voice chat, messages, and media"),
-    ServicePreset("youtube", "YouTube", "YouTube", "Видео, превью, Shorts и CDN Google", "Video playback, thumbnails, Shorts, and Google CDN", "youtube.svg", "#ff0033"),
+    ServicePreset("youtube", "YouTube / YT Music", "YouTube / YT Music", "Видео, музыка, превью, Shorts и CDN Google", "Video, music, thumbnails, Shorts, and Google CDN", "youtube.svg", "#ff0033", "YouTube и YT Music", "YouTube and YT Music"),
     ServicePreset("telegram-desktop", "Telegram", "Telegram", "Десктопное приложение Telegram для ПК", "Telegram desktop app for PC", "telegram.svg", "#26a5e4", "Десктопное приложение Telegram", "Telegram desktop app"),
     ServicePreset("roblox", "Roblox", "Roblox", "Игровая платформа и CDN Roblox", "Roblox platform and CDN", "roblox.svg", "#d8dde8"),
     ServicePreset("dnd", "D&D", "D&D", "D&D Beyond, Roll20, Foundry VTT и инструменты", "D&D Beyond, Roll20, Foundry VTT, and tools", "dnd.svg", "#9b2335", "D&D Beyond, Roll20, Foundry VTT", "D&D Beyond, Roll20, Foundry VTT"),

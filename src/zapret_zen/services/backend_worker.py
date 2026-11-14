@@ -5,6 +5,7 @@ import multiprocessing as mp
 import os
 import queue
 import tempfile
+import time
 import traceback
 import uuid
 from collections.abc import Callable
@@ -42,6 +43,7 @@ def _snapshot(context) -> dict[str, Any]:
             "zapret_ipset_mode": settings.zapret_ipset_mode,
             "zapret_game_filter_mode": settings.zapret_game_filter_mode,
             "zapret_udp_exclude_ports": settings.zapret_udp_exclude_ports,
+            "youtube_stability": bool(getattr(settings, "youtube_stability", True)),
             "selected_runtime_mode": getattr(settings, "selected_runtime_mode", "zapret"),
             "autostart_windows": bool(settings.autostart_windows),
             "apply_update_on_next_launch": bool(getattr(settings, "apply_update_on_next_launch", False)),
@@ -253,9 +255,21 @@ def _worker_main(task_queue, result_queue) -> None:
         context.processes.ensure_quic_firewall_state()
     except Exception:
         pass
+    # The supervisor is opportunistic: it runs between queued tasks and after a
+    # short idle wait, so a crashed winws is restarted within seconds without a
+    # busy loop and without delaying user actions.
+    supervisor_interval = 2.0
+    next_supervisor_at = time.monotonic() + supervisor_interval
     while True:
-        task = task_queue.get()
-        if not isinstance(task, dict):
+        timeout = max(0.05, next_supervisor_at - time.monotonic())
+        try:
+            task: Any = task_queue.get(timeout=timeout)
+        except queue.Empty:
+            task = None
+        if task is None or not isinstance(task, dict):
+            if time.monotonic() >= next_supervisor_at:
+                _supervise_zapret(context)
+                next_supervisor_at = time.monotonic() + supervisor_interval
             continue
         action = str(task.get("action", ""))
         if action == "shutdown":
@@ -290,6 +304,24 @@ def _worker_main(task_queue, result_queue) -> None:
                     "source": _action_error_source(action),
                 }
             )
+
+def _supervise_zapret(context) -> None:
+    """Restart an owned winws that exited without a user request."""
+    try:
+        state = context.processes.supervise_zapret()
+    except Exception as error:
+        try:
+            context.logging.log("warning", "Zapret supervisor failed", error=str(error))
+        except Exception:
+            pass
+        return
+    if state is None:
+        return
+    try:
+        context.logging.log("info", "Zapret supervisor state", status=state.status, pid=state.pid)
+    except Exception:
+        pass
+
 
 def _action_error_source(action: str) -> str:
     normalized = (action or "").strip().lower()
@@ -542,6 +574,7 @@ def _handle_apply_settings(context, payload, emit_progress):
         before.zapret_game_filter_mode,
         before.zapret_udp_exclude_ports,
         before.selected_zapret_general,
+        bool(getattr(before, "youtube_stability", True)),
     )
     theme_before = before.theme
     language_before = before.language
@@ -561,6 +594,7 @@ def _handle_apply_settings(context, payload, emit_progress):
         str(effective_payload.get("zapret_game_filter_mode", before.zapret_game_filter_mode)),
         str(effective_payload.get("zapret_udp_exclude_ports", before.zapret_udp_exclude_ports)),
         str(effective_payload.get("selected_zapret_general", before.selected_zapret_general)),
+        bool(effective_payload.get("youtube_stability", getattr(before, "youtube_stability", True))),
     )
     zapret_changed = zapret_before != requested_zapret
     zapret_was_running = _stop_zapret_for_reconfiguration(context) if zapret_changed else False
@@ -582,6 +616,7 @@ def _handle_apply_settings(context, payload, emit_progress):
         current.zapret_game_filter_mode,
         current.zapret_udp_exclude_ports,
         current.selected_zapret_general,
+        bool(getattr(current, "youtube_stability", True)),
     )
     states = {item.component_id: item for item in context.processes.list_states()}
     if tg_before != tg_after and states.get("tg-ws-proxy") and states["tg-ws-proxy"].status == "running":
@@ -609,6 +644,32 @@ def _handle_apply_settings(context, payload, emit_progress):
         "zapret_restarted": zapret_restarted,
     }
     result.update(_snapshot(context))
+    return result
+
+
+@_register_action("supervise_zapret")
+def _handle_supervise_zapret(context, payload, emit_progress):
+    """Polled by the UI so a crash/restart is reflected without user actions."""
+    before = context.processes.list_states()
+    state = context.processes.supervise_zapret()
+    state_changed = False
+    if state is not None:
+        after = {item.component_id: item for item in context.processes.list_states()}
+        before_map = {item.component_id: item for item in before}
+        current = after.get("zapret")
+        previous = before_map.get("zapret")
+        state_changed = current is None or previous is None or (
+            current.status,
+            current.pid,
+            current.last_error,
+        ) != (
+            previous.status,
+            previous.pid,
+            previous.last_error,
+        )
+    result = {"state_changed": state_changed}
+    if state_changed:
+        result.update(_snapshot(context))
     return result
 
 
@@ -1309,10 +1370,18 @@ class BackendWorkerClient(QObject):
         self._process = ctx.Process(target=_worker_main, args=(self._task_queue, self._result_queue), daemon=True)
         self._process.start()
         self._cancel_paths: dict[str, str] = {}
+        self._pending_task_ids: set[str] = set()
+        self._supervise_in_flight = False
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(40)
         self._poll_timer.timeout.connect(self._poll_results)
         self._poll_timer.start()
+        # Supervisor heartbeat: keeps the worker's idle loop ticking so a crashed
+        # winws gets restarted even when the user does nothing.
+        self._supervise_timer = QTimer(self)
+        self._supervise_timer.setInterval(5000)
+        self._supervise_timer.timeout.connect(self._request_supervision)
+        self._supervise_timer.start()
 
     def submit(self, action: str, payload: dict[str, Any] | None = None) -> str:
         task_id = uuid.uuid4().hex
@@ -1326,8 +1395,27 @@ class BackendWorkerClient(QObject):
                 pass
             self._cancel_paths[task_id] = cancel_path
             task_payload["cancel_path"] = cancel_path
+        self._pending_task_ids.add(task_id)
         self._task_queue.put({"id": task_id, "action": action, "payload": task_payload})
         return task_id
+
+    def _request_supervision(self) -> None:
+        """Queue one non-blocking supervision tick.
+
+        The tick is skipped while a supervision request is already pending or
+        while other work is queued, so it can never pile up entries in the task
+        queue or delay real user actions.
+        """
+        if self._supervise_in_flight:
+            return
+        pending = {task_id for task_id in self._pending_task_ids if task_id}
+        if len(pending) > 1:
+            return
+        self._supervise_in_flight = True
+        try:
+            self.submit("supervise_zapret")
+        except Exception:
+            self._supervise_in_flight = False
 
     def cancel(self, task_id: str) -> None:
         cancel_path = self._cancel_paths.get(task_id)
@@ -1349,6 +1437,9 @@ class BackendWorkerClient(QObject):
                 self.task_progress.emit(message)
                 continue
             task_id = str(message.get("id", ""))
+            self._pending_task_ids.discard(task_id)
+            if str(message.get("action", "")) == "supervise_zapret":
+                self._supervise_in_flight = False
             cancel_path = self._cancel_paths.pop(task_id, None)
             if cancel_path:
                 try:
@@ -1367,6 +1458,7 @@ class BackendWorkerClient(QObject):
         except Exception:
             pass
         self._poll_timer.stop()
+        self._supervise_timer.stop()
         if self._process.is_alive():
             self._process.join(timeout=3)
         if self._process.is_alive():

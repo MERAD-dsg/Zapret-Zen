@@ -18,6 +18,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,11 @@ from zapret_zen.services.tg_proxy_manager import TelegramProxyManager
 from zapret_zen.services.runtime_diagnostics import RuntimeDiagnostics
 from zapret_zen.services.runtime_updates import RuntimeUpdateManager
 from zapret_zen.services.zapret_runtime import ZapretRuntimeBuilder
+from zapret_zen.services.zapret_command import (
+    apply_youtube_quic_guard,
+    exclude_udp_ports,
+    missing_command_files,
+)
 
 _VPN_PROCESS_PATTERNS = (
     "nekobox",
@@ -174,6 +180,15 @@ class ProcessManager:
         self._log_streams: dict[str, Any] = {}
         self._telegram_proxy_launch_info: dict[str, Any] | None = None
         self._diagnostic_runtime_override = False
+        self._zapret_desired_running = False
+        self._zapret_supervisor_locked = False
+        self._zapret_restart_attempts: deque[float] = deque()
+        self._zapret_next_retry_at = 0.0
+        self._zapret_last_exit_code: int | None = None
+        self._zapret_ready = False
+        self._zapret_ready_warned = False
+        self._zapret_started_at = 0.0
+        self._curl_http3_support: tuple[str, bool] | None = None
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
         self.github = GitHubNetworkClient(logging, recovery_runner=self.with_github_connectivity_recovery)
         self._creationflags = 0
@@ -330,9 +345,19 @@ class ProcessManager:
         for component in self.list_components():
             state = self._states.get(component.id, ComponentState(component_id=component.id))
             if component.id == "zapret":
-                was_running = self._is_image_running("winws.exe")
-                state.status = "running" if was_running else "stopped"
-                state.pid = None
+                process = self._processes.get(component.id)
+                if process is not None and process.poll() is None:
+                    state.status = "running"
+                    state.pid = process.pid
+                    state.last_error = ""
+                else:
+                    state.pid = None
+                    if self._zapret_desired_running and self._zapret_last_exit_code is not None:
+                        state.status = "error"
+                        if not state.last_error:
+                            state.last_error = f"winws exited with code {self._zapret_last_exit_code}"
+                    elif state.status != "error":
+                        state.status = "stopped"
             elif component.id == "tg-ws-proxy":
                 worker = self._processes.get(component.id)
                 listening = self._is_port_listening(settings.tg_proxy_host, int(settings.tg_proxy_port))
@@ -363,6 +388,13 @@ class ProcessManager:
 
     def start_component(self, component_id: str) -> ComponentState:
         with self._process_lock:
+            if component_id == "zapret" and not self._diagnostic_runtime_override:
+                self._zapret_desired_running = True
+                self._zapret_supervisor_locked = False
+                self._zapret_restart_attempts.clear()
+                self._zapret_next_retry_at = 0.0
+                self._zapret_ready = False
+                self._zapret_ready_warned = False
             return self._start_component_unlocked(component_id)
 
     def _start_component_unlocked(self, component_id: str) -> ComponentState:
@@ -400,6 +432,12 @@ class ProcessManager:
 
     def stop_component(self, component_id: str) -> ComponentState:
         with self._process_lock:
+            if component_id == "zapret" and not self._diagnostic_runtime_override:
+                self._zapret_desired_running = False
+                self._zapret_supervisor_locked = False
+                self._zapret_restart_attempts.clear()
+                self._zapret_next_retry_at = 0.0
+                self._zapret_last_exit_code = None
             return self._stop_component_unlocked(component_id)
 
     def _stop_component_unlocked(self, component_id: str) -> ComponentState:
@@ -407,15 +445,15 @@ class ProcessManager:
 
         if component_id == "zapret":
             active_runtime = self._current_zapret_runtime
-            self._force_stop_zapret_runtime()
+            stopped = self._force_stop_zapret_runtime()
+            self._zapret_ready = False
             self._close_source_log_stream("zapret")
             self._processes.pop(component_id, None)
             if active_runtime is not None:
                 self._reset_active_runtime_dir(active_runtime)
-            state.status = "stopped" if not self._is_image_running("winws.exe") else "running"
+            state.status = "stopped" if stopped else "error"
             state.pid = None
-            if state.status != "stopped":
-                state.last_error = "Failed to stop winws.exe"
+            state.last_error = "" if stopped else "Failed to stop the owned winws.exe process"
             self._states[component_id] = state
             self.logging.log("info", "Zapret stopped")
             self._invalidate_state_cache()
@@ -533,9 +571,126 @@ class ProcessManager:
         self.logging.log("info", "Component autostart state changed", component_id=component_id, autostart=target.autostart)
         return target
 
+    ZAPRET_READY_MARKERS = ("windivert initialized. capture is started.",)
+
+    def _read_zapret_ready(self) -> bool:
+        return self._check_log_hint("zapret", self.ZAPRET_READY_MARKERS)
+
+    def _wait_for_owned_winws(self, process: subprocess.Popen[Any], *, grace: float = 1.5) -> bool:
+        """Confirm the exact child survived its WinDivert initialization grace period.
+
+        winws writes its banner to a redirected log file, so stdio may stay
+        buffered for a while: the "capture is started" line is used only as a
+        fast positive signal, never as a requirement.  A child that exits inside
+        the grace window is a real failure (bad filter, missing payload file,
+        driver still held by a leaked instance).
+        """
+        deadline = time.monotonic() + max(0.0, grace)
+        while True:
+            code = process.poll()
+            if code is not None:
+                self._zapret_last_exit_code = code
+                self._zapret_ready = False
+                return False
+            if self._read_zapret_ready():
+                self._zapret_ready = True
+                return True
+            if time.monotonic() >= deadline:
+                self._zapret_ready = False
+                return True
+            time.sleep(0.1)
+
+    def _note_zapret_ready_state(self, process: subprocess.Popen[Any]) -> None:
+        """Warn once when a live winws never reported that capture started.
+
+        This is the "process looks healthy but nothing is being desynced" case
+        that made single videos hang: winws alive, WinDivert idle.
+        """
+        if self._zapret_ready:
+            return
+        if self._read_zapret_ready():
+            self._zapret_ready = True
+            return
+        if process.poll() is None and not self._zapret_ready_warned:
+            self._zapret_ready_warned = True
+            self.logging.log(
+                "warning",
+                "winws is running but did not report WinDivert capture; check that another winws/WinDivert instance is not holding the driver",
+            )
+
+    def supervise_zapret(self, *, now: float | None = None) -> ComponentState | None:
+        """Restart an unexpectedly exited owned winws with a bounded backoff.
+
+        Called only from the single backend thread between tasks.  Diagnostics and
+        explicit user stops are never restarted.  After three crashes in a minute
+        the supervisor locks until the user presses Start again, avoiding a crash
+        loop that would keep tearing down live browser connections.
+        """
+        with self._process_lock:
+            if not self._zapret_desired_running or self._diagnostic_runtime_override or self._zapret_supervisor_locked:
+                return None
+            clock = time.monotonic() if now is None else now
+            process = self._processes.get("zapret")
+            if process is not None and process.poll() is None:
+                while self._zapret_restart_attempts and clock - self._zapret_restart_attempts[0] > 60.0:
+                    self._zapret_restart_attempts.popleft()
+                return None
+            if process is not None:
+                self._zapret_last_exit_code = process.poll()
+            if self._zapret_next_retry_at > 0.0:
+                if clock < self._zapret_next_retry_at:
+                    return None
+                self._zapret_next_retry_at = 0.0
+                state = self._start_zapret("zapret")
+                if state.status == "running":
+                    self.logging.log("info", "Zapret supervisor restarted winws", pid=state.pid)
+                return state
+            while self._zapret_restart_attempts and clock - self._zapret_restart_attempts[0] > 60.0:
+                self._zapret_restart_attempts.popleft()
+            if len(self._zapret_restart_attempts) >= 3:
+                self._zapret_supervisor_locked = True
+                state = self._states.get("zapret", ComponentState(component_id="zapret"))
+                state.status = "error"
+                state.pid = None
+                state.last_error = "winws crashed repeatedly; automatic restart paused. Press Start to retry."
+                self._states["zapret"] = state
+                self._invalidate_state_cache()
+                self.logging.log("error", "Zapret supervisor paused after repeated crashes")
+                return state
+            self._zapret_restart_attempts.append(clock)
+            delay = (2.0, 5.0, 15.0)[len(self._zapret_restart_attempts) - 1]
+            self._zapret_next_retry_at = clock + delay
+            self.logging.log(
+                "warning",
+                "Zapret exited unexpectedly; scheduling restart",
+                exit_code=self._zapret_last_exit_code,
+                delay_seconds=delay,
+                attempt=len(self._zapret_restart_attempts),
+            )
+            state = self._states.get("zapret", ComponentState(component_id="zapret"))
+            state.status = "error"
+            state.pid = None
+            state.last_error = f"winws exited; restarting in {int(delay)}s"
+            self._states["zapret"] = state
+            self._invalidate_state_cache()
+            return state
+
+    def _apply_youtube_stability(self, command: list[str], *, lists_dir: Path, bin_dir: Path) -> list[str]:
+        settings = self.settings.get()
+        if "youtube" not in {str(item) for item in list(settings.selected_service_ids or [])}:
+            return command
+        return apply_youtube_quic_guard(
+            command,
+            lists_dir=lists_dir,
+            bin_dir=bin_dir,
+            enabled=bool(getattr(settings, "youtube_stability", True)),
+            quic_blocked=bool(settings.zapret_block_quic),
+        )
+
     def _start_zapret(self, component_id: str) -> ComponentState:
-        # всегда перезапускаем, чтобы не было конфликтов со сторонними процессами
-        self.stop_component(component_id)
+        # Restart only the process owned by this app.  External winws instances
+        # are reported separately and are never killed by image name.
+        self._stop_component_unlocked(component_id)
         selected_option = self._resolve_selected_general_option()
         if selected_option is None:
             state = ComponentState(component_id=component_id, status="error", last_error="No general script found.")
@@ -566,6 +721,10 @@ class ProcessManager:
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
             winws_command = self._apply_selected_service_command_extensions(winws_command, lists_dir=lists_dir)
             winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
+            winws_command = self._apply_youtube_stability(winws_command, lists_dir=lists_dir, bin_dir=bin_dir)
+            missing_files = missing_command_files(winws_command)
+            if missing_files:
+                raise FileNotFoundError("Missing winws rule/payload files: " + ", ".join(missing_files[:8]))
             if not winws_command:
                 state = ComponentState(
                     component_id=component_id,
@@ -586,20 +745,20 @@ class ProcessManager:
             if self._job:
                 self._job.assign_pid(process.pid)
             self._processes[component_id] = process
-            running = False
-            for _ in range(24):
-                if self._is_image_running("winws.exe"):
-                    running = True
-                    break
-                time.sleep(0.25)
+            running = self._wait_for_owned_winws(process)
             if running:
                 try:
                     (active_root / ".driver_path_in_use").write_text(datetime.utcnow().isoformat(), encoding="utf-8")
                 except Exception:
                     pass
                 self._track_active_driver_services()
+                self._zapret_last_exit_code = None
+                self._zapret_started_at = time.monotonic()
+                if not self._diagnostic_runtime_override:
+                    self._zapret_desired_running = True
+                self._note_zapret_ready_state(process)
                 state = ComponentState(component_id=component_id, status="running", pid=process.pid)
-                self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0])
+                self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0], pid=process.pid)
             else:
                 self._close_source_log_stream("zapret")
                 log_hint = self._recent_source_log_error("zapret")
@@ -656,7 +815,7 @@ class ProcessManager:
         ipset_mode: str,
         game_mode: str,
     ) -> ComponentState:
-        self.stop_component(component_id)
+        self._stop_component_unlocked(component_id)
         selected_option = self._resolve_selected_general_option()
         if selected_option is None:
             state = ComponentState(component_id=component_id, status="error", last_error="No general script found.")
@@ -698,6 +857,10 @@ class ProcessManager:
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
             winws_command = self._apply_selected_service_command_extensions(winws_command, lists_dir=lists_dir)
             winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
+            winws_command = self._apply_youtube_stability(winws_command, lists_dir=lists_dir, bin_dir=bin_dir)
+            missing_files = missing_command_files(winws_command)
+            if missing_files:
+                raise FileNotFoundError("Missing winws rule/payload files: " + ", ".join(missing_files[:8]))
             if not winws_command:
                 state = ComponentState(
                     component_id=component_id,
@@ -717,18 +880,18 @@ class ProcessManager:
             if self._job:
                 self._job.assign_pid(process.pid)
             self._processes[component_id] = process
-            running = False
-            for _ in range(10):
-                if self._is_image_running("winws.exe"):
-                    running = True
-                    break
-                time.sleep(0.2)
+            running = self._wait_for_owned_winws(process)
             if running:
                 try:
                     (active_root / ".driver_path_in_use").write_text(datetime.utcnow().isoformat(), encoding="utf-8")
                 except Exception:
                     pass
                 self._track_active_driver_services()
+                self._zapret_last_exit_code = None
+                self._zapret_started_at = time.monotonic()
+                if not self._diagnostic_runtime_override:
+                    self._zapret_desired_running = True
+                self._note_zapret_ready_state(process)
                 state = ComponentState(component_id=component_id, status="running", pid=process.pid)
             else:
                 self._close_source_log_stream("zapret")
@@ -828,8 +991,15 @@ class ProcessManager:
             return command
         try:
             vpn_data = self.vpn_detector.detect_vpn_priority_context()
+            report_issue = getattr(self.vpn_detector, "report_issue", None)
+            if callable(report_issue):
+                for issue in vpn_data.get("issues", []) or []:
+                    report_issue(str(issue))
         except Exception as error:
             self.logging.log("warning", "Failed to detect VPN priority context", error=str(error))
+            report_issue = getattr(self.vpn_detector, "report_issue", None)
+            if callable(report_issue):
+                report_issue(f"VPN priority detection failed: {error}")
             return command
 
         adapter_indexes = [int(item) for item in vpn_data.get("adapter_indexes", []) if str(item).isdigit()]
@@ -865,17 +1035,10 @@ class ProcessManager:
         return updated
 
     def _exclude_udp_ports_from_command(self, command: list[str], excluded_ranges: list[tuple[int, int]]) -> list[str]:
-        updated: list[str] = []
-        for arg in command:
-            if arg.startswith("--wf-udp=") or arg.startswith("--filter-udp="):
-                key, value = arg.split("=", 1)
-                ranges = self.vpn_detector.parse_port_ranges(value)
-                if ranges:
-                    filtered = self.vpn_detector.subtract_port_ranges(ranges, excluded_ranges)
-                    value = self.vpn_detector.format_port_ranges(filtered) or "12"
-                    arg = f"{key}={value}"
-            updated.append(arg)
-        return updated
+        # Delegate to the pure helper: the old version kept "--wf-udp=12" (or a
+        # "--filter-udp=12") sentinel when everything was excluded, which made
+        # winws capture an unrelated port instead of dropping the filter.
+        return exclude_udp_ports(command, excluded_ranges)
 
     def _subtract_port_ranges(
         self,
@@ -2337,47 +2500,143 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         return filtered
 
     def _convert_test_target(self, name: str, value: str) -> dict[str, str]:
-        if value.upper().startswith("PING:"):
-            host = value.split(":", 1)[1].strip()
-            return {"name": name, "type": "ping", "host": host}
-        host = value.replace("https://", "").replace("http://", "").split("/", 1)[0].strip()
-        return {"name": name, "type": "url", "url": value, "host": host}
+        """Parse targets.txt syntax, including our stability extensions.
+
+        ``REPEATn:`` repeats the whole probe n times (a single 200 from the
+        YouTube homepage proves nothing about the next stream), and ``RANGE:``
+        asks for a byte range so the media/CDN path is exercised, not just a
+        cached HTML head.
+        """
+        raw = str(value or "").strip()
+        repeat = 1
+        while True:
+            head = raw.split(":", 1)[0].strip().upper()
+            if head.startswith("REPEAT") and head[6:].isdigit():
+                repeat = max(1, min(10, int(head[6:])))
+                raw = raw.split(":", 1)[1].strip() if ":" in raw else ""
+                continue
+            break
+        ranged = False
+        if raw.upper().startswith("RANGE:"):
+            ranged = True
+            raw = raw.split(":", 1)[1].strip()
+        if raw.upper().startswith("PING:"):
+            host = raw.split(":", 1)[1].strip()
+            target = {"name": name, "type": "ping", "host": host}
+        else:
+            host = raw.replace("https://", "").replace("http://", "").split("/", 1)[0].strip()
+            target = {"name": name, "type": "url", "url": raw, "host": host}
+        if repeat > 1:
+            target["repeat"] = str(repeat)
+        if ranged:
+            target["range"] = "1"
+        return target
 
     def _target_is_reachable(self, target: dict[str, str]) -> bool:
         return self._check_target(target) == "ok"
 
     def _check_target(self, target: dict[str, str]) -> str:
         target_type = target.get("type", "url")
+        try:
+            repeat = max(1, min(10, int(target.get("repeat", "1") or "1")))
+        except (TypeError, ValueError):
+            repeat = 1
+        ranged = str(target.get("range", "")) in {"1", "true", "True"}
         if target_type == "ping":
-            return "ok" if self._ping_target(target.get("host", "")) else "failed"
+            for _ in range(repeat):
+                if not self._ping_target(target.get("host", "")):
+                    return "failed"
+            return "ok"
         url = target.get("url", "").strip()
         if not url:
             return "failed"
+        # A single successful handshake is exactly the false positive that hid
+        # the "next video hangs" bug: probe every repetition on a fresh
+        # connection instead of reusing one keep-alive session.
         tests = [
             ["--http1.1"],
+            ["--http2"],
             ["--tlsv1.2", "--tls-max", "1.2"],
             ["--tlsv1.3", "--tls-max", "1.3"],
         ]
-        saw_451 = False
-        for extra in tests:
-            status = self._curl_status(url, extra)
-            if status == 451:
-                saw_451 = True
-            elif status > 0:
-                return "ok"
-        return "blocked" if saw_451 else "failed"
+        for attempt in range(repeat):
+            if attempt:
+                time.sleep(0.2)
+            saw_451 = False
+            for extra in tests:
+                status = self._curl_status(url, extra, ranged=ranged)
+                if status == 451:
+                    saw_451 = True
+                    continue
+                if status > 0:
+                    break
+            else:
+                return "blocked" if saw_451 else "failed"
+            if self._quic_probe_blocked(target.get("host", "")):
+                return "blocked"
+        return "ok"
+
+    def _quic_probe_blocked(self, host: str) -> bool:
+        """Best-effort HTTP/3 probe; returns True only on a *blocked* verdict.
+
+        YouTube ships most playback over QUIC, so a target reachable over TCP but
+        with dead QUIC keeps hanging on the next stream.  curl without HTTP/3
+        support simply yields 0, which is reported as "unknown" rather than as a
+        failure to avoid false alarms.
+        """
+        if not host:
+            return False
+        curl_path = shutil.which("curl.exe") or shutil.which("curl")
+        if not curl_path:
+            return False
+        if not self._curl_supports_http3(curl_path):
+            return False
+        proc = self._run_quiet(
+            [
+                curl_path,
+                "--http3-only",
+                "-s",
+                "--connect-timeout",
+                "2",
+                "-m",
+                "4",
+                "-o",
+                "NUL",
+                "-w",
+                "%{http_code}",
+                f"https://{host}/generate_204",
+            ]
+        )
+        code = (proc.stdout or "").strip()
+        if not code.isdigit():
+            return False
+        return int(code) == 451
+
+    def _curl_supports_http3(self, curl_path: str) -> bool:
+        cached = getattr(self, "_curl_http3_support", None)
+        if cached is not None and cached[0] == curl_path:
+            return cached[1]
+        supported = False
+        try:
+            proc = self._run_quiet([curl_path, "--version"])
+            supported = "http3" in (proc.stdout or "").lower()
+        except Exception:
+            supported = False
+        self._curl_http3_support = (curl_path, supported)
+        return supported
 
     def _target_explicitly_blocked(self, target: dict[str, str]) -> bool:
         return self._check_target(target) == "blocked"
 
-    def _curl_status(self, url: str, extra_args: list[str]) -> int:
+    def _curl_status(self, url: str, extra_args: list[str], *, ranged: bool = False) -> int:
         curl_path = shutil.which("curl.exe") or shutil.which("curl")
         if not curl_path:
             return 0
+        mode_args = ["-r", "0-1023"] if ranged else ["-I"]
         proc = self._run_quiet(
             [
                 curl_path,
-                "-I",
+                *mode_args,
                 "-s",
                 "--connect-timeout",
                 "2",
@@ -2605,27 +2864,39 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def _kill_image(self, image_name: str) -> None:
         self._run_quiet(["taskkill", "/IM", image_name, "/F", "/T"])
 
-    def _force_stop_zapret_runtime(self) -> None:
+    def _force_stop_zapret_runtime(self) -> bool:
+        """Stop only the winws child owned by this ProcessManager.
+
+        The previous implementation killed every ``winws.exe`` on the machine,
+        including other bypass tools and services.  That both broke unrelated
+        traffic and made health checks lie when an external instance survived.
+        """
         process = self._processes.get("zapret")
-        if process and process.poll() is None:
+        if process is not None and process.poll() is None:
             try:
                 process.terminate()
                 process.wait(timeout=3)
             except Exception:
                 try:
                     process.kill()
+                    process.wait(timeout=2)
                 except Exception:
                     pass
-        if process and process.pid:
+        if process is not None and process.poll() is None:
             self._run_quiet(["taskkill", "/PID", str(process.pid), "/F", "/T"])
-        self._cleanup_zapret_driver_services(self._current_zapret_runtime)
-        for _ in range(8):
-            self._kill_image("winws.exe")
-            if not self._is_image_running("winws.exe"):
-                break
-            time.sleep(0.35)
+            try:
+                process.wait(timeout=2)
+            except Exception:
+                pass
+        stopped = process is None or process.poll() is not None
+        if process is not None:
+            self._zapret_last_exit_code = process.poll()
         self._processes.pop("zapret", None)
+        self._zapret_ready = False
+        self._cleanup_zapret_driver_services(self._current_zapret_runtime)
         self._current_zapret_runtime = None
+        self._invalidate_state_cache()
+        return stopped
 
     def _reset_active_runtime_dir(self, active_root: Path) -> None:
         driver_marker = active_root / ".driver_path_in_use"

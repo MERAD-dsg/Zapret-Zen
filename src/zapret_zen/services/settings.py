@@ -102,6 +102,10 @@ class SettingsManager:
             settings.zapret_ipset_mode = "loaded"
             changed = True
 
+        if not isinstance(settings.youtube_stability, bool):
+            settings.youtube_stability = True
+            changed = True
+
         if raw.get("zapret_game_filter_mode") == "all":
             settings.zapret_game_filter_mode = "tcpudp"
             changed = True

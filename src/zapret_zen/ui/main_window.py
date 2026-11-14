@@ -4583,6 +4583,7 @@ class MainWindow(QMainWindow):
         self._file_tag_render_timer.timeout.connect(self._render_file_tags_chunk)
         self._backend_tasks: dict[str, str] = {}
         self._backend_attached = False
+        self._last_zapret_supervisor_notice = ""
         self._tg_proxy_connect_dlg: QDialog | None = None
         self._autostart_watchdog = QTimer(self)
         self._autostart_watchdog.setSingleShot(True)
@@ -6112,6 +6113,44 @@ class MainWindow(QMainWindow):
                 self._t("Component failed to start"),
                 f"{self._component_display_name(state.component_id)}: {translated_error}",
             )
+
+    def _notify_zapret_supervisor_from_payload(self, payload: object) -> None:
+        """Explain an automatic winws restart instead of silently flickering."""
+        if not isinstance(payload, dict):
+            return
+        raw_states = payload.get("states", [])
+        items = raw_states.values() if isinstance(raw_states, dict) else raw_states
+        if not isinstance(items, list):
+            return
+        for raw in items:
+            component_id = str(raw.get("component_id", "")) if isinstance(raw, dict) else ""
+            if component_id != "zapret":
+                continue
+            last_error = str(raw.get("last_error", "")) if isinstance(raw, dict) else ""
+            status = str(raw.get("status", "")) if isinstance(raw, dict) else ""
+            key = f"{status}|{last_error}"
+            if key == getattr(self, "_last_zapret_supervisor_notice", ""):
+                return
+            self._last_zapret_supervisor_notice = key
+            if "restarting in" in last_error:
+                self._toast_notification(
+                    "warning",
+                    self._t("Zapret connection lost"),
+                    self._t(
+                        "Соединение Zapret прервалось. Перезапускаю автоматически, чтобы новые видео YouTube не зависали.",
+                        "The Zapret connection dropped. Restarting automatically so new YouTube videos do not hang.",
+                    ),
+                )
+            elif "crashed repeatedly" in last_error:
+                self._toast_notification(
+                    "error",
+                    self._t("Zapret restart paused"),
+                    self._t(
+                        "winws падал несколько раз подряд. Автоперезапуск приостановлен — нажмите «Запустить», чтобы попробовать снова.",
+                        "winws crashed several times in a row. Automatic restart is paused; press Start to try again.",
+                    ),
+                )
+            return
 
     def _notify_telegram_proxy_status_from_payload(self, payload: object) -> None:
         if not isinstance(payload, dict):
@@ -8445,7 +8484,19 @@ class MainWindow(QMainWindow):
         quic_cb.setChecked(bool(self._current_settings_value(ctrl, "block_quic", settings.zapret_block_quic)))
         ctrl["block_quic"] = quic_cb
         layout.addWidget(quic_cb)
-        self._wire_component_settings_widgets(ctrl["ipset_mode"], ctrl["gaming_mode"], udp_excl, quic_cb)
+        youtube_cb = QCheckBox(self._t("Стабильный режим YouTube/YT Music"))
+        youtube_cb.setChecked(
+            bool(self._current_settings_value(ctrl, "youtube_stability", getattr(settings, "youtube_stability", True)))
+        )
+        youtube_cb.setToolTip(
+            self._t(
+                "Добавляет отдельное правило для QUIC-подключений YouTube и YT Music, чтобы новые видео и треки не уходили в бесконечную загрузку. Отключите, если хотите использовать только стратегию из general-файла.",
+                "Adds a dedicated rule for YouTube/YT Music QUIC connections so new videos and tracks do not get stuck loading. Disable it to use only the strategy from the general file.",
+            )
+        )
+        ctrl["youtube_stability"] = youtube_cb
+        layout.addWidget(youtube_cb)
+        self._wire_component_settings_widgets(ctrl["ipset_mode"], ctrl["gaming_mode"], udp_excl, quic_cb, youtube_cb)
 
     def _build_tg_card_settings(self, layout: QVBoxLayout, ctrl: dict) -> None:
         settings = self.context.settings.get()
@@ -8970,6 +9021,9 @@ class MainWindow(QMainWindow):
         cb = ctrl.get("block_quic")
         if isinstance(cb, QCheckBox):
             cb.setChecked(settings.zapret_block_quic)
+        cb = ctrl.get("youtube_stability")
+        if isinstance(cb, QCheckBox):
+            cb.setChecked(bool(getattr(settings, "youtube_stability", True)))
 
         inp = ctrl.get("tg_host")
         if isinstance(inp, QLineEdit):
@@ -9082,6 +9136,9 @@ class MainWindow(QMainWindow):
         cb = ctrl.get("block_quic")
         if isinstance(cb, QCheckBox):
             payload["zapret_block_quic"] = cb.isChecked()
+        cb = ctrl.get("youtube_stability")
+        if isinstance(cb, QCheckBox):
+            payload["youtube_stability"] = cb.isChecked()
 
         inp = ctrl.get("tg_host")
         if isinstance(inp, QLineEdit):
@@ -10210,6 +10267,8 @@ class MainWindow(QMainWindow):
         self._update_general_options_from_payload(payload)
         if action in {"toggle_master_runtime", "start_enabled_components", "start_component", "select_general", "apply_settings", "load_startup_snapshot", "load_components_payload", "select_runtime_mode"}:
             self._notify_component_errors_from_payload(payload)
+        if action in {"supervise_zapret", "toggle_master_runtime", "start_enabled_components", "start_component", "stop_component"}:
+            self._notify_zapret_supervisor_from_payload(payload)
         self._notify_telegram_proxy_status_from_payload(payload)
         self._notify_zapret_restart_from_payload(payload)
         if action in {"update_zapret_runtime", "update_tg_ws_proxy_runtime"}:

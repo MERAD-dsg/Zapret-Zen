@@ -93,7 +93,6 @@
   "Pre-release": "Пре-релиз",
   "Update branch": "Ветка обновлений",
   "Tray notifications": "Уведомления в трее",
-  "Language": "Язык",
   "Logs and Files": "Логи и файлы",
   "Logs": "Логи",
   "Tools": "Инструменты",
@@ -289,5 +288,12 @@
   "Delete profile": "Удалить профиль",
   "Delete profile \"{name}\"? This action cannot be undone.": "Удалить профиль «{name}»? Это действие нельзя отменить.",
   "Switching profile...": "Переключение профиля...",
-  "Applying profile settings...": "Применяем настройки профиля..."
+  "Applying profile settings...": "Применяем настройки профиля...",
+  "Стабильный режим YouTube/YT Music": "Стабильный режим YouTube/YT Music",
+  "Block QUIC (UDP 443)": "Блокировать QUIC (UDP 443)",
+  "Adds a dedicated rule for YouTube/YT Music QUIC connections so new videos and tracks do not get stuck loading. Disable it to use only the strategy from the general file.": "Добавляет отдельное правило для QUIC-подключений YouTube и YT Music, чтобы новые видео и треки не уходили в бесконечную загрузку. Отключите, если хотите использовать только стратегию из general-файла.",
+  "Zapret connection lost": "Соединение Zapret прервалось",
+  "The Zapret connection dropped. Restarting automatically so new YouTube videos do not hang.": "Соединение Zapret прервалось. Перезапускаю автоматически, чтобы новые видео YouTube не зависали.",
+  "Zapret restart paused": "Автоперезапуск Zapret приостановлен",
+  "winws crashed several times in a row. Automatic restart is paused; press Start to try again.": "winws падал несколько раз подряд. Автоперезапуск приостановлен — нажмите «Запустить», чтобы попробовать снова."
 }

@@ -12,6 +12,9 @@ from zapret_zen.services.service_catalog import ALWAYS_APPLY_SERVICE_IDS
 from zapret_zen.services.service_rules import SERVICE_RULES
 from zapret_zen.services.settings import SettingsManager
 from zapret_zen.services.storage import StorageManager
+from zapret_zen.services.zapret_command import YOUTUBE_STABILITY_DOMAINS
+
+_PROTECTED_CORE_FILES = {"winws.exe", "winws2.exe", "windivert.dll", "windivert64.sys", "cygwin1.dll"}
 
 
 def _strip_zone_identifier(path: Path) -> None:
@@ -125,6 +128,14 @@ class ZapretRuntimeBuilder:
             target_dir.mkdir(parents=True, exist_ok=True)
             for source in source_dir.glob("*"):
                 if source.is_file():
+                    if folder_name == "bin" and source.name.lower() in _PROTECTED_CORE_FILES:
+                        self.logging.log(
+                            "info",
+                            "Mod core binary ignored; keeping the audited base engine",
+                            bundle=str(bundle_root),
+                            file=source.name,
+                        )
+                        continue
                     dest = target_dir / source.name
                     shutil.copy2(source, dest)
                     _strip_zone_identifier(dest)
@@ -226,6 +237,10 @@ class ZapretRuntimeBuilder:
             existing = self._read_list_lines(target)
             merged = self._merge_with_conflict_resolution(lists_dir, filename, existing, incoming)
             target.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+        if "youtube" in selected_ids and bool(getattr(self.settings.get(), "youtube_stability", True)):
+            (lists_dir / "list-youtube.txt").write_text(
+                "\n".join(YOUTUBE_STABILITY_DOMAINS) + "\n", encoding="utf-8"
+            )
         for service_id in selected_ids:
             rule = SERVICE_RULES.get(str(service_id))
             if rule is None:

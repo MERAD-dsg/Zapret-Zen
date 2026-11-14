@@ -50,6 +50,7 @@ class VpnDetector:
 
     def __init__(self, logging: LoggingManager) -> None:
         self.logging = logging
+        self._reported_issues: set[str] = set()
         self._creationflags = 0
         self._startupinfo: subprocess.STARTUPINFO | None = None
         if sys.platform.startswith("win"):
@@ -58,6 +59,21 @@ class VpnDetector:
             startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startup.wShowWindow = 0
             self._startupinfo = startup
+
+    def report_issue(self, message: str) -> None:
+        """Record a VPN-detection problem once per session.
+
+        Detection runs before every Zapret start, so a missing PowerShell or a
+        broken ``Get-NetAdapter`` used to be invisible: the app silently started
+        winws without VPN-priority filters and the user saw the same hangs.
+        """
+        cleaned = message.strip()
+        if not cleaned:
+            return
+        if cleaned in self._reported_issues:
+            return
+        self._reported_issues.add(cleaned)
+        self.logging.log("warning", "VPN priority detection issue", issue=cleaned)
 
     def detect_vpn_priority_context(self) -> dict[str, list[str]]:
         script = r"""
@@ -105,10 +121,12 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
 """
         proc = self._run_powershell_json(script)
         if not proc:
+            self.report_issue("PowerShell returned no data for VPN detection; VPN-priority filters are disabled for this start.")
             return {"adapter_indexes": [], "remote_ips": []}
         try:
             payload = json.loads(proc)
         except json.JSONDecodeError:
+            self.report_issue("PowerShell returned malformed JSON for VPN detection; VPN-priority filters are disabled for this start.")
             return {"adapter_indexes": [], "remote_ips": []}
         adapter_indexes = payload.get("adapter_indexes", []) if isinstance(payload, dict) else []
         remote_ips = payload.get("remote_ips", []) if isinstance(payload, dict) else []
