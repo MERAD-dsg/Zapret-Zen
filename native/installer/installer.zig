@@ -387,11 +387,31 @@ fn clear_previous_install() void {
     const looks_like_previous = looks_like_zapret_install(g_install_utf8);
     if (!looks_like_previous and !dir_is_empty(g_install_utf8)) {
         set_control_text(g_status, "В папке установки уже есть посторонние файлы — распаковка поверх.");
+        remove_nested_payload_dirs(g_install_utf8);
         return;
     }
     if (looks_like_previous) {
         set_control_text(g_status, "Удаление предыдущей версии…");
         std.Io.Dir.cwd().deleteTree(g_io, g_install_utf8) catch {};
+        return;
+    }
+    // 2.1f extracted the archive verbatim, leaving the payload one level deeper
+    // ("...\\Zapret-Zen\\Zapret-Zen-2.1f-portable\\Zapret-Zen.exe").  Remove such
+    // nested copies so the fixed layout is what ends up on disk.
+    remove_nested_payload_dirs(g_install_utf8);
+}
+
+fn remove_nested_payload_dirs(root: []const u8) void {
+    var dir = std.Io.Dir.cwd().openDir(g_io, root, .{}) catch return;
+    defer dir.close(g_io);
+    var iterator = dir.iterate();
+    while (iterator.next(g_io) catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        if (!std.mem.startsWith(u8, entry.name, "Zapret-Zen-")) continue;
+        const nested = std.fmt.allocPrint(g_gpa, "{s}\\{s}", .{ root, entry.name }) catch continue;
+        if (!looks_like_zapret_install(nested)) continue;
+        set_control_text(g_status, "Удаление остатков предыдущей версии…");
+        std.Io.Dir.cwd().deleteTree(g_io, nested) catch {};
     }
 }
 

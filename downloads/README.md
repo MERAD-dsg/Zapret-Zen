@@ -1,25 +1,25 @@
-# Zapret-Zen 2.1g — установщик и портативная сборка (Windows x64)
+# Zapret-Zen 2.1h — установщик и портативная сборка (Windows x64)
 
-Два файла, оба уже содержат все исправления 2.1f и 2.1g:
+Два файла, оба уже содержат все исправления 2.1f–2.1h:
 
 | Файл | Размер | SHA-256 |
 | --- | --- | --- |
-| `Zapret-Zen-2.1g-setup.exe` — установщик «в один клик» (внутри уже лежит архив) | 42 167 808 байт (~40,2 МБ) | `8d33fb80a315022b19419723f65394f05419c212f9fcd19c972d89639e8a34dd` |
-| `Zapret-Zen-2.1g-portable.zip` — портативная папка целиком | 41 694 887 байт (~39,8 МБ) | `7ef4e109b320e6e7d1bc39948e5782246db1f3c8c0dd183d6516985c842f0d01` |
+| `Zapret-Zen-2.1h-setup.exe` — установщик «в один клик» (внутри уже лежит архив) | 42 441 728 байт (~40,5 МБ) | `1372cbfef35c095dbf7e8e32d2f3873ac97b4a47120c11b47b4c188b85e2af48` |
+| `Zapret-Zen-2.1h-portable.zip` — портативная папка целиком | 41 694 887 байт (~39,8 МБ) | `5cd166cccd06da1a5859b5ff05ce38d22ab32bf9348e0ccc0ededa62c2c2ebe8` |
 
 ## Скачать
 
 Прямые ссылки (ветка `arena/c452d19e-zapret-zen`):
 
 * установщик:
-  <https://github.com/MERAD-dsg/Zapret-Zen/raw/refs/heads/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1g-setup.exe>
+  <https://github.com/MERAD-dsg/Zapret-Zen/raw/refs/heads/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1h-setup.exe>
 * портативный архив:
-  <https://github.com/MERAD-dsg/Zapret-Zen/raw/refs/heads/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1g-portable.zip>
+  <https://github.com/MERAD-dsg/Zapret-Zen/raw/refs/heads/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1h-portable.zip>
 
 Страницы файлов (кнопка «Download raw file»), если прямая ссылка не открывается:
 
-* <https://github.com/MERAD-dsg/Zapret-Zen/blob/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1g-setup.exe>
-* <https://github.com/MERAD-dsg/Zapret-Zen/blob/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1g-portable.zip>
+* <https://github.com/MERAD-dsg/Zapret-Zen/blob/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1h-setup.exe>
+* <https://github.com/MERAD-dsg/Zapret-Zen/blob/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1h-portable.zip>
 
 Архив и установщик лежат в git намеренно: `uploads.github.com` (загрузка
 ассетов в релизы) в среде сборки заблокирован, релиз-ассет создать не удалось.
@@ -47,7 +47,7 @@
 4. **Discord Rich Presence выключен по умолчанию** (включается галочкой
    «Discord Rich Presence» в настройках).
 
-## Что исправлено в 2.1g (после вашего отчёта об ошибке запуска)
+## Что исправлено в 2.1g/2.1h (после вашего отчёта об ошибке запуска)
 
 1. **«Параллельная конфигурация неправильна» при запуске `Zapret-Zen.exe`.**
    Причина в манифесте лаунчера: версия сборки была записана как `2.1f.0.0`, а
@@ -63,17 +63,20 @@
    она пред-отмечена, а при закрытии окна установщика приложение стартует по
    пути `%ProgramFiles%\Zapret-Zen\Zapret-Zen.exe`.
 5. **Повторная установка** поверх старой версии: прежняя папка Zapret-Zen
-   удаляется (только если в ней действительно лежит предыдущая установка),
-   поэтому «остатки» больше не мешают.
+   удаляется (только если в ней действительно лежит предыдущая установка), а
+   вложенные каталоги `Zapret-Zen-2.1f-portable\`, оставшиеся от битой версии,
+   тоже вычищаются — вручную удалять ничего не нужно.
+6. **Установщик сразу просит права администратора** (`requireAdministrator`),
+   иначе запись в `%ProgramFiles%` блокируется и установка молча не удаётся.
 
 ## Установка (setup.exe)
 
-1. Запустить `Zapret-Zen-2.1g-setup.exe`. Если Windows покажет «SmartScreen» —
+1. Запустить `Zapret-Zen-2.1h-setup.exe`. Если Windows покажет «SmartScreen» —
    «Подробнее» → «Выполнить в любом случае» (файл не подписан).
 2. Установка идёт в `%ProgramFiles%\Zapret-Zen`, создаётся ярлык в меню «Пуск»
    и запись «Программы и компоненты» → «Удалить».
 3. Галочка «Запустить Zapret-Zen после установки» — по желанию.
-4. Тихая установка: `Zapret-Zen-2.1g-setup.exe /S`.
+4. Тихая установка: `Zapret-Zen-2.1h-setup.exe /S`.
 5. Ярлык «Zapret-Zen» появляется на рабочем столе (и в меню «Пуск»).
 6. Удаление: «Программы и компоненты» → Zapret-Zen → Удалить (или
    `"%ProgramFiles%\Zapret-Zen\Zapret-Zen.exe" --uninstall`). Удаляются ярлык,
@@ -91,8 +94,8 @@
 ## Проверка целостности
 
 ```powershell
-Get-FileHash .\Zapret-Zen-2.1g-setup.exe -Algorithm SHA256
-Get-FileHash .\Zapret-Zen-2.1g-portable.zip -Algorithm SHA256
+Get-FileHash .\Zapret-Zen-2.1h-setup.exe -Algorithm SHA256
+Get-FileHash .\Zapret-Zen-2.1h-portable.zip -Algorithm SHA256
 ```
 
 Значения должны совпасть с таблицей выше (они же лежат в `*.sha256`).
@@ -103,8 +106,8 @@ Get-FileHash .\Zapret-Zen-2.1g-portable.zip -Algorithm SHA256
 python scripts/setup_portable_cache.py                 # embeddable Python + колёса
 pip install ziglang                                    # кросс-компилятор для .exe
 python scripts/build_installer.py --prepare            # native/launcher/Zapret-Zen.exe
-python scripts/build_portable.py --zip dist/Zapret-Zen-2.1g-portable.zip \
-    --zip-prefix Zapret-Zen-2.1g-portable
-python scripts/build_installer.py --payload dist/Zapret-Zen-2.1g-portable.zip \
-    --out dist_native                                  # Zapret-Zen-2.1g-setup.exe
+python scripts/build_portable.py --zip dist/Zapret-Zen-2.1h-portable.zip \
+    --zip-prefix Zapret-Zen-2.1h-portable
+python scripts/build_installer.py --payload dist/Zapret-Zen-2.1h-portable.zip \
+    --out dist_native                                  # Zapret-Zen-2.1h-setup.exe
 ```

@@ -34,10 +34,10 @@ INSTALLER_ZIG = NATIVE / "installer" / "installer.zig"
 ICON = ROOT / "ui_assets" / "icons" / "app.ico"
 
 APP_NAME = "Zapret-Zen"
-VERSION = "2.1g"
+VERSION = "2.1h"
 # Windows assembly identities need four *numeric* parts: "2.1f.0.0" makes the
 # loader reject the exe with "parallel configuration is incorrect" (0xc0150004).
-VERSION_ASSEMBLY = "2.1.1.0"
+VERSION_ASSEMBLY = "2.1.2.0"
 VERSION_QUAD = VERSION_ASSEMBLY.replace(".", ",")
 
 
@@ -63,7 +63,7 @@ def _find_zig() -> str:
     )
 
 
-def _write_rc(path: Path, exe_name: str, description: str) -> Path:
+def _write_rc(path: Path, exe_name: str, description: str, *, require_admin: bool = False) -> Path:
     """Emit a .rc script and compile it with `zig rc` (no windres needed)."""
     icon = ICON.as_posix()
     manifest = ROOT / "native" / "launcher" / "app.manifest"
@@ -76,7 +76,7 @@ def _write_rc(path: Path, exe_name: str, description: str) -> Path:
         ' version="6.0.0.0" publicKeyToken="6595b64144ccf1df" language="*"/>\n'
         '  </dependentAssembly></dependency>\n'
         '  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges>\n'
-        '    <requestedExecutionLevel level="asInvoker" uiAccess="false"/>\n'
+        f'    <requestedExecutionLevel level="{"requireAdministrator" if require_admin else "asInvoker"}" uiAccess="false"/>\n'
         '  </requestedPrivileges></security></trustInfo>\n'
         '  <application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings>\n'
         '    <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>\n'
@@ -133,12 +133,17 @@ def _write_build_options(path: Path, *, embed: bool) -> None:
 
 
 def _build_installer(zig: str, out: Path, payload: Path | None, workdir: Path) -> None:
+    # A .res compiled from our own icon/manifest is linked into the setup exe:
+    # without requireAdministrator the installer cannot write to Program Files.
+    res_path = _write_rc(out, f"{APP_NAME}-setup",
+                         "Установщик Zapret-Zen", require_admin=True)
     options = workdir / "build_options.zig"
     _write_build_options(options, embed=payload is not None)
     cmd = [
         zig, "build-exe", "-target", "x86_64-windows-gnu", "-municode",
         "--subsystem", "windows", "-O", "ReleaseSmall",
         "-femit-bin=" + str(out),
+        str(res_path),
         "--dep", "build_options",
         "--dep", "payload",
         f"-Mroot={INSTALLER_ZIG}",
@@ -146,6 +151,8 @@ def _build_installer(zig: str, out: Path, payload: Path | None, workdir: Path) -
         f"-Mpayload={workdir / 'payload_mod.zig'}",
     ]
     subprocess.run(cmd, check=True, cwd=workdir)
+    res_path.unlink(missing_ok=True)
+    out.with_suffix(".rc").unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:
