@@ -9,8 +9,11 @@ CPython plus the pinned win_amd64 wheels, so it can be produced on any machine:
                                     ui_assets/ themes/ sample_data/
 
 Inputs are the artefacts already cached by the session:
-  .release_cache/python-3.11.9-embed-amd64.zip
+  .release_cache/python-3.11.9-embed-amd64.zip (or the extracted directory
+  .release_cache/python-3.11.9-embed-amd64 with size-verified files)
   .release_cache/wheels/*.whl
+
+Both can be recreated with:  python scripts/setup_portable_cache.py
 
 Usage:
     python scripts/build_portable.py [--out dist_portable] [--zip ../Zapret-Zen-portable.zip]
