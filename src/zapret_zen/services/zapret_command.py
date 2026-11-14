@@ -158,6 +158,38 @@ def exclude_udp_ports(command: list[str], excluded: list[tuple[int, int]]) -> li
     return join_profiles(new_global, new_profiles)
 
 
+def udp_443_profile_count(command: list[str]) -> int:
+    """How many desync profiles target UDP 443 at all."""
+    _global_args, profiles = split_profiles(command)
+    return sum(1 for profile in profiles if _profile_matches_udp(profile, 443))
+
+
+def uses_quic_bypass_data(command: list[str], *, excluded_domains: tuple[str, ...] = YOUTUBE_STABILITY_DOMAINS) -> bool:
+    """True when a UDP-443 profile bypasses traffic *outside* YouTube.
+
+    Blocking QUIC machine-wide is the most reliable cure for hanging YouTube
+    playback, but it breaks Discord voice and games that rely on QUIC.  A
+    strategy that already desyncs every UDP-443 flow (no host/IP restriction)
+    makes the global block redundant — in that case we keep QUIC untouched.
+    """
+    _global_args, profiles = split_profiles(command)
+    for profile in profiles:
+        if not _profile_matches_udp(profile, 443):
+            continue
+        if not any(arg.startswith("--filter-l7=") and "quic" in arg.lower() for arg in profile):
+            continue
+        restrictions = [
+            arg for arg in profile
+            if arg.startswith(("--hostlist=", "--hostlist-domains=", "--ipset=", "--filter-host="))
+        ]
+        if not restrictions:
+            return True
+        if all(any(domain in arg.lower() for domain in excluded_domains) for arg in restrictions):
+            continue
+        return False
+    return False
+
+
 def apply_youtube_quic_guard(
     command: list[str],
     *,
@@ -174,7 +206,11 @@ def apply_youtube_quic_guard(
     traffic are left untouched.  If the user disabled UDP 443 capture or blocked
     QUIC globally, no guard is added.
     """
-    if not enabled or quic_blocked or not command:
+    if not enabled or not command:
+        return list(command)
+    # With a machine-wide QUIC block the YouTube guard would be dead weight:
+    # no QUIC Initial ever leaves the machine.
+    if quic_blocked:
         return list(command)
     global_args, profiles = split_profiles(command)
     if not any(arg.startswith("--wf-udp=") and _profile_matches_udp([arg.replace("--wf-", "--filter-", 1)], 443) for arg in global_args):

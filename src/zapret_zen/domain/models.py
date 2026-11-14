@@ -60,7 +60,7 @@ class AppSettings:
     zapret_ipset_mode: str = "loaded"
     zapret_game_filter_mode: str = "disabled"
     zapret_udp_exclude_ports: str = "51820"
-    zapret_block_quic: bool = False
+    zapret_block_quic: bool = True
     youtube_stability: bool = True
     selected_dns_preset: str = ""
     dns_custom_server: bool = False
@@ -68,7 +68,7 @@ class AppSettings:
     apply_update_on_next_launch: bool = False
     dismissed_app_update_key: str = ""
     dismissed_component_updates: dict[str, str] = field(default_factory=dict)
-    discord_rpc_enabled: bool = True
+    discord_rpc_enabled: bool = False
     window_geometry: str = ""
 
 

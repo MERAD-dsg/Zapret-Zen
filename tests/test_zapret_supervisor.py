@@ -313,3 +313,38 @@ def test_readiness_warning_respects_grace_period(manager: ProcessManager) -> Non
     manager._note_zapret_ready_state(process, now=130.0)  # type: ignore[arg-type]
     manager._note_zapret_ready_state(process, now=140.0)  # type: ignore[arg-type]
     assert len(logged) == 1 and "did not report WinDivert capture" in logged[0]
+
+
+# --- fatal start errors: no endless "restarting in Ns" -----------------------
+
+def test_config_error_locks_supervisor_instead_of_restarting(manager: ProcessManager) -> None:
+    """A rejected command line can never be fixed by restarting it."""
+    manager._zapret_desired_running = True
+    manager._processes["zapret"] = _FakeProcess(returncode=1)  # type: ignore[assignment]
+    manager._zapret_last_start_error = (
+        "winws отклонил параметры запуска или не смог захватить трафик (код 1). "
+        "Лог: unknown option --dpi-desync"
+    )
+    state = manager.supervise_zapret(now=100.0)
+    assert state is not None
+    assert manager._zapret_supervisor_locked is True
+    assert "restarting in" not in state.last_error
+    assert "отклонил параметры" in state.last_error
+
+
+def test_transient_crash_still_gets_regular_backoff(manager: ProcessManager) -> None:
+    manager._zapret_desired_running = True
+    manager._processes["zapret"] = _FakeProcess(returncode=0)  # type: ignore[assignment]
+    manager._zapret_last_start_error = ""
+    state = manager.supervise_zapret(now=100.0)
+    assert state is not None
+    assert "restarting in 2s" in state.last_error
+    assert manager._zapret_supervisor_locked is False
+
+
+def test_exit_code_explanations_are_actionable() -> None:
+    explain = ProcessManager._explain_zapret_exit_code
+    assert "0xC0000135" in explain(-1073741515)
+    assert "0xC0000005" in explain(-1073741819)
+    assert "администратора" in explain(5)
+    assert explain(None) == ""

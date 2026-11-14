@@ -106,6 +106,15 @@ class SettingsManager:
             settings.youtube_stability = True
             changed = True
 
+        # One-time defaults migration (2.1f): QUIC blocking measured by users as
+        # noticeably better for YouTube, and Discord Rich Presence is opt-in.
+        if not isinstance(raw.get("zapret_block_quic"), bool):
+            settings.zapret_block_quic = True
+            changed = True
+        if not isinstance(raw.get("discord_rpc_enabled"), bool):
+            settings.discord_rpc_enabled = False
+            changed = True
+
         if raw.get("zapret_game_filter_mode") == "all":
             settings.zapret_game_filter_mode = "tcpudp"
             changed = True

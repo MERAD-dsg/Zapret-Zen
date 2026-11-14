@@ -228,11 +228,13 @@ def _copy_tree(source: Path, target: Path) -> None:
 
 
 def _write_launchers(root: Path) -> None:
+    # pythonw.exe, not python.exe: the old launcher spawned a console window that
+    # stayed open for the whole session next to the main window.
     run_cmd = """@echo off
 setlocal
 cd /d "%~dp0"
-rem Zapret-Zen portable launcher. Requests elevation via the app itself.
-"%~dp0python.exe" -m zapret_zen.main %*
+rem Zapret-Zen portable launcher. The app requests elevation itself.
+"%~dp0pythonw.exe" -m zapret_zen.main %*
 exit /b %errorlevel%
 """
     (root / "run_zapret_zen.cmd").write_text(run_cmd.replace("\n", "\r\n"), encoding="ascii")
@@ -248,6 +250,20 @@ pause
 """
     (root / "run_zapret_zen_console.cmd").write_text(debug.replace("\n", "\r\n"), encoding="ascii")
     (root / "portable.flag").write_text("portable\n", encoding="ascii")
+
+
+def _install_native_launcher(root: Path) -> str:
+    """Place Zapret-Zen.exe (native GUI launcher) next to pythonw.exe.
+
+    The launcher is committed as a build artefact of `scripts/build_installer.py`;
+    a plain archive build without it still works through run_zapret_zen.cmd, so a
+    missing binary is a warning, not an error.
+    """
+    source = ROOT / "native" / "launcher" / "Zapret-Zen.exe"
+    if not source.exists():
+        return "missing"
+    shutil.copy2(source, root / "Zapret-Zen.exe")
+    return "copied"
 
 
 def _write_pth(root: Path) -> None:
@@ -267,6 +283,7 @@ def build(out: Path, zip_path: Path | None, zip_prefix: str = "") -> dict[str, o
         _copy_tree(ROOT / name, out / name)
     installed = _extract_wheels(out / "site-packages")
     _write_launchers(out)
+    _install_native_launcher(out)
     (out / "VERSION.txt").write_text(
         f"Zapret-Zen portable (source build)\nbuilt from {ROOT.name}\n", encoding="utf-8"
     )

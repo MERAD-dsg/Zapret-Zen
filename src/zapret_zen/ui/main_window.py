@@ -6133,15 +6133,23 @@ class MainWindow(QMainWindow):
                 return
             self._last_zapret_supervisor_notice = key
             if "restarting in" in last_error:
-                self._toast_notification(
-                    "warning",
-                    self._t("Zapret connection lost"),
-                    self._t(
-                        "Соединение Zapret прервалось. Перезапускаю автоматически, чтобы новые видео YouTube не зависали.",
-                        "The Zapret connection dropped. Restarting automatically so new YouTube videos do not hang.",
-                    ),
-                )
-            elif "crashed repeatedly" in last_error:
+                # A single automatic restart is a background detail, not
+                # something worth a system notification: it used to pop a
+                # "Python" bubble on every transient winws exit.  Only record it
+                # in the status area; the locked/crashed cases below still toast.
+                toggle_hint = getattr(self, "_toggle_status_label", None)
+                if toggle_hint is not None:
+                    try:
+                        toggle_hint.setText(
+                            self._t(
+                                "Zapret перезапускается автоматически…",
+                                "Zapret is restarting automatically…",
+                            )
+                        )
+                    except Exception:
+                        pass
+                return
+            if "crashed repeatedly" in last_error:
                 self._toast_notification(
                     "error",
                     self._t("Zapret restart paused"),
@@ -6149,6 +6157,12 @@ class MainWindow(QMainWindow):
                         "winws падал несколько раз подряд. Автоперезапуск приостановлен — нажмите «Запустить», чтобы попробовать снова.",
                         "winws crashed several times in a row. Automatic restart is paused; press Start to try again.",
                     ),
+                )
+            elif last_error:
+                self._toast_notification(
+                    "error",
+                    self._t("Zapret cannot start with this strategy"),
+                    self._translate_component_error(last_error),
                 )
             return
 

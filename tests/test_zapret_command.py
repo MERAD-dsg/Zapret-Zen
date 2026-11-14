@@ -200,3 +200,32 @@ def test_youtube_domains_cover_music_and_cdn() -> None:
 def test_exclude_udp_ports_is_robust(value: str, tmp_path: Path) -> None:
     command = ["--wf-tcp=443", value, "--filter-tcp=443"] if value else ["--wf-tcp=443", "--filter-tcp=443"]
     assert exclude_udp_ports(command, [(443, 443)]) is not None
+
+
+# --- QUIC policy helpers ----------------------------------------------------
+
+def test_uses_quic_bypass_data_detects_broad_udp443_profile() -> None:
+    from zapret_zen.services.zapret_command import uses_quic_bypass_data
+
+    broad = [
+        "--wf-udp-out=443",
+        "--filter-udp=443",
+        "--filter-l7=quic",
+        "--dpi-desync=fake",
+        "--new",
+        "--wf-tcp-out=443",
+    ]
+    assert uses_quic_bypass_data(broad) is True
+
+
+def test_uses_quic_bypass_data_ignores_youtube_only_profile() -> None:
+    from zapret_zen.services.zapret_command import uses_quic_bypass_data
+
+    youtube_only = [
+        "--wf-udp-out=443",
+        "--filter-udp=443",
+        "--filter-l7=quic",
+        "--hostlist-domains=www.youtube.com,rr1.googlevideo.com",
+        "--dpi-desync=fake",
+    ]
+    assert uses_quic_bypass_data(youtube_only) is False

@@ -44,6 +44,7 @@ from zapret_zen.services.zapret_command import (
     apply_youtube_quic_guard,
     exclude_udp_ports,
     missing_command_files,
+    uses_quic_bypass_data,
 )
 
 _VPN_PROCESS_PATTERNS = (
@@ -187,6 +188,8 @@ class ProcessManager:
         self._zapret_last_exit_code: int | None = None
         self._zapret_ready = False
         self._zapret_ready_warned = False
+        self._zapret_last_start_error = ""
+        self._zapret_last_start_exit_code: int | None = None
         self._zapret_started_at = 0.0
         self._curl_http3_support: tuple[str, bool] | None = None
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
@@ -591,6 +594,33 @@ class ProcessManager:
     def _read_zapret_ready(self) -> bool:
         return self._check_log_hint("zapret", self.ZAPRET_READY_MARKERS)
 
+    def _zapret_last_start_was_config_error(self) -> bool:
+        """True when the last start failed in a way a restart cannot fix.
+
+        A rejected command line (unknown/invalid argument, unparsable filter)
+        fails immediately every single time, so the supervisor must stop and
+        report instead of looping "restarting in 15s".
+        """
+        message = (self._zapret_last_start_error or "").lower()
+        if not message:
+            return False
+        return any(
+            marker in message
+            for marker in (
+                "отклонил параметры",
+                "не принял параметры",
+                "missing winws rule",
+                "failed to parse winws command",
+                "unknown option",
+                "invalid argument",
+                "invalid filter",
+                "cannot parse",
+                "can't parse",
+                "файл стратегии",
+                "payload",
+            )
+        )
+
     def _wait_for_owned_winws(self, process: subprocess.Popen[Any], *, grace: float = 1.5) -> bool:
         """Confirm the exact child survived its WinDivert initialization grace period.
 
@@ -616,6 +646,61 @@ class ProcessManager:
             time.sleep(0.1)
 
     ZAPRET_READY_GRACE_SECONDS = 20.0
+
+    # winws exits with these codes when the argument list itself is rejected
+    # (unknown option, bad filter, missing payload).  Restarting such a process
+    # can never help: the app used to show "exited; restarting in 15s" forever.
+    ZAPRET_FATAL_COMMAND_ERROR_MARKERS = (
+        "unknown option", "invalid argument", "unknown parameter", "parse error",
+        "can't parse", "cannot parse", "invalid filter",
+    )
+
+    @staticmethod
+    def _explain_zapret_exit_code(code: int | None) -> str:
+        """Human-readable meaning of a winws exit code."""
+        if code is None:
+            return ""
+        if code == 0:
+            return "winws завершился штатно (код 0)."
+        if code in (1, 2, 255):
+            return f"winws отклонил параметры запуска или не смог захватить трафик (код {code})."
+        if code == -1073741515 or code == 0xC0000135:  # 3221225781
+            return "winws не нашёл зависимую DLL (код 0xC0000135). Переустановите приложение."
+        if code in (0xC0000005, -1073741819):
+            return "winws упал с нарушением доступа (0xC0000005) — обычно это конфликт WinDivert или антивируса."
+        if code == 5:
+            return "winws не хватило прав (код 5). Запустите приложение от администратора."
+        return f"winws завершился с кодом {code}."
+
+    def _diagnose_zapret_start_failure(self, log_hint: str, exit_code: int | None) -> str:
+        """Build an actionable, non-technical explanation for a failed start.
+
+        The old message surfaced only the last matching log line (often a raw
+        "windivert: error opening filter"), which told the user nothing about
+        what to do.  Exit codes let us tell apart "wrong command line" from
+        "driver conflict" from "no admin rights".
+        """
+        text = (log_hint or "").lower()
+        hints: list[str] = []
+        if "access is denied" in text or "requires admin" in text or "elevation" in text:
+            hints.append("Нужны права администратора: WinDivert не может открыть фильтр.")
+        if "already" in text and ("in use" in text or "exists" in text):
+            hints.append("Драйвер WinDivert уже занят другим экземпляром winws — закройте сторонние обходчики.")
+        if "cannot open" in text and "filter" in text:
+            hints.append("Не удалось открыть фильтр WinDivert: обычно мешает антивирус или другой winws.exe.")
+        if "missing" in text and "file" in text:
+            hints.append("Не найден файл стратегии или payload — пересоберите архив стратегий.")
+        if any(marker in text for marker in self.ZAPRET_FATAL_COMMAND_ERROR_MARKERS):
+            hints.append("winws не принял параметры командной строки (конфликт флагов стратегии).")
+        reason = self._explain_zapret_exit_code(exit_code)
+        parts: list[str] = []
+        if reason:
+            parts.append(reason)
+        if hints:
+            parts.extend(dict.fromkeys(hints))
+        if log_hint:
+            parts.append(f"Лог: {log_hint}")
+        return " ".join(parts)
 
     def _note_zapret_ready_state(self, process: subprocess.Popen[Any], *, now: float | None = None) -> None:
         """Warn once when a live winws never reported that capture started.
@@ -675,6 +760,22 @@ class ProcessManager:
                 return state
             while self._zapret_restart_attempts and clock - self._zapret_restart_attempts[0] > 60.0:
                 self._zapret_restart_attempts.popleft()
+            if self._zapret_last_start_was_config_error():
+                # The command line is rejected by winws itself: restarting the
+                # same arguments only produces an endless "restarting in Ns"
+                # loop, so stop and explain what to fix instead.
+                self._zapret_supervisor_locked = True
+                state = self._states.get("zapret", ComponentState(component_id="zapret"))
+                state.status = "error"
+                state.pid = None
+                state.last_error = (
+                    self._zapret_last_start_error
+                    or "winws отклоняет параметры запуска. Выберите другую стратегию или отключите стабильный режим YouTube."
+                )
+                self._states["zapret"] = state
+                self._invalidate_state_cache()
+                self.logging.log("error", "Zapret supervisor stopped: start arguments rejected", error=state.last_error)
+                return state
             if len(self._zapret_restart_attempts) >= 3:
                 self._zapret_supervisor_locked = True
                 state = self._states.get("zapret", ComponentState(component_id="zapret"))
@@ -747,6 +848,7 @@ class ProcessManager:
             if not (bin_dir / "winws.exe").exists():
                 raise FileNotFoundError(f"winws.exe was not materialized: {bin_dir / 'winws.exe'}")
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
+            self._apply_quic_policy(winws_command)
             winws_command = self._apply_selected_service_command_extensions(winws_command, lists_dir=lists_dir)
             winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
             winws_command = self._apply_youtube_stability(winws_command, lists_dir=lists_dir, bin_dir=bin_dir)
@@ -787,13 +889,12 @@ class ProcessManager:
                 state = ComponentState(component_id=component_id, status="running", pid=process.pid)
                 self.logging.log("info", "Zapret started", script=str(active_script), command=winws_command[0], pid=process.pid)
             else:
-                self._close_source_log_stream("zapret")
                 log_hint = self._recent_source_log_error("zapret")
-                error_message = log_hint or "winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert."
-                if not log_hint:
-                    started_then_exited = self._check_log_hint("zapret", ("windivert", "capture is started"))
-                    if started_then_exited:
-                        error_message = "winws started but exited immediately. This script may not target the tested sites."
+                error_message = (
+                    self._diagnose_zapret_start_failure(log_hint, self._zapret_last_exit_code)
+                    or "winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert."
+                )
+                self._close_source_log_stream("zapret")
                 state = ComponentState(
                     component_id=component_id,
                     status="error",
@@ -831,6 +932,12 @@ class ProcessManager:
             if active_root is not None:
                 self._reset_active_runtime_dir(active_root)
             self._current_zapret_runtime = None
+        if state.status == "running":
+            self._zapret_last_start_error = ""
+            self._zapret_last_start_exit_code = None
+        else:
+            self._zapret_last_start_error = str(state.last_error or "")
+            self._zapret_last_start_exit_code = self._zapret_last_exit_code
         self._states[component_id] = state
         return state
 
@@ -882,6 +989,7 @@ class ProcessManager:
             if not (bin_dir / "winws.exe").exists():
                 raise FileNotFoundError(f"winws.exe was not materialized: {bin_dir / 'winws.exe'}")
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
+            self._apply_quic_policy(winws_command)
             winws_command = self._apply_selected_service_command_extensions(winws_command, lists_dir=lists_dir)
             winws_command = self._apply_vpn_priority_to_command(winws_command, lists_dir=lists_dir)
             winws_command = self._apply_youtube_stability(winws_command, lists_dir=lists_dir, bin_dir=bin_dir)
@@ -1311,6 +1419,38 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             return
         self.set_quic_blocked(desired)
 
+    def _apply_quic_policy(self, command: list[str]) -> bool:
+        """Decide whether YouTube traffic should avoid QUIC entirely.
+
+        QUIC bypass in zapret desyncs only the first few packets of a flow; with
+        QUIC every new video opens a fresh flow, which is exactly why the second
+        video hangs.  Blocking UDP/443 machine-wide turns playback into plain
+        TLS over TCP where the existing strategy keeps working.
+
+        The block is released when the selected strategy already bypasses all
+        UDP-443 traffic, otherwise we'd break Discord voice and other QUIC apps
+        for no benefit.
+        """
+        try:
+            requested = bool(self.settings.get().zapret_block_quic)
+        except Exception:
+            requested = False
+        if not requested:
+            self.set_quic_blocked(False)
+            return False
+        try:
+            broad_bypass = uses_quic_bypass_data(command)
+        except Exception:
+            broad_bypass = False
+        if broad_bypass:
+            # Strategy handles QUIC for every host: a global block would only
+            # damage voice/video in other apps.
+            self.set_quic_blocked(False)
+            self.logging.log("info", "QUIC block skipped: selected strategy already bypasses all UDP 443")
+            return False
+        self.set_quic_blocked(True)
+        return True
+
     def _should_force_fortnite_runtime_modes(self) -> bool:
         return self._fortnite_service_selected() and not self._diagnostic_runtime_override
 
@@ -1358,6 +1498,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         elif not ipset_all.exists():
             ipset_all.write_text("", encoding="utf-8")
 
+        # Machine-wide QUIC block (firewall rule) instead of rewriting the
+        # strategy: keeps the user's general*.bat untouched while removing the
+        # QUIC path that made every other YouTube video hang.
         game_mode = (settings.zapret_game_filter_mode or "disabled").strip().lower()
         if self._should_force_fortnite_runtime_modes():
             game_mode = "tcpudp"

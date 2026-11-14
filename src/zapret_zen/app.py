@@ -197,19 +197,35 @@ def _is_admin_windows() -> bool:
         return True
 
 
+def _portable_pythonw_executable() -> Path | None:
+    """Path of the console-less interpreter shipped in the portable layout."""
+    candidate = Path(sys.executable).with_name("pythonw.exe")
+    return candidate if candidate.exists() else None
+
+
+def _portable_app_command(argv: list[str]) -> list[str]:
+    """Arguments that re-run this application from a fresh interpreter."""
+    if is_packaged_runtime():
+        return list(argv)
+    src_root = development_install_root(__file__) / "src"
+    current_pythonpath = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = str(src_root) if not current_pythonpath else f"{src_root}{os.pathsep}{current_pythonpath}"
+    return ["-m", "zapret_zen.main", *argv]
+
+
 def _ensure_admin_windows(argv: list[str]) -> int:
     if _is_admin_windows():
         return 0
 
-    if is_packaged_runtime():
-        executable = sys.executable
-        params_args = list(argv)
-    else:
-        executable = sys.executable
-        src_root = development_install_root(__file__) / "src"
-        current_pythonpath = os.environ.get("PYTHONPATH", "")
-        os.environ["PYTHONPATH"] = str(src_root) if not current_pythonpath else f"{src_root}{os.pathsep}{current_pythonpath}"
-        params_args = ["-m", "zapret_zen.main", *argv]
+    params_args = _portable_app_command(argv)
+    executable = sys.executable
+    # Portable builds run under python.exe in the archive, but we are started by
+    # Zapret-Zen.exe -> pythonw.exe, so an elevated relaunch must keep using
+    # pythonw.exe: relaunching through python.exe leaves an empty black console
+    # window sitting next to the main window for the whole session.
+    pythonw = _portable_pythonw_executable()
+    if pythonw is not None:
+        executable = str(pythonw)
     params = " ".join(f'"{arg}"' if " " in arg else arg for arg in params_args)
     _startup_trace(f"run: relaunch elevated executable={executable} params={params}")
     result = ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, params, None, 1)
