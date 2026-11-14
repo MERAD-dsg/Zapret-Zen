@@ -34,30 +34,20 @@ def test_rc_version_quad_is_comma_separated(builder) -> None:
     assert all(part.strip().isdigit() for part in parts)
 
 
-def test_shipped_launcher_manifest_version_is_numeric() -> None:
-    """Read the manifest straight out of the committed launcher binary."""
-    import struct
+def test_shipped_binaries_carry_no_assembly_manifest() -> None:
+    """No RT_MANIFEST in our exes: SxS loading broke the app on a real machine.
 
-    binary = Path(__file__).resolve().parents[1] / "native" / "launcher" / "Zapret-Zen.exe"
+    2.1f..2.1h embedded an assembly manifest and Windows refused to start the
+    binary with "parallel configuration is incorrect" (0xc0150004).  The
+    installer now elevates itself at runtime instead of via requireAdministrator.
+    """
+    root = Path(__file__).resolve().parents[1]
+    binary = root / "native" / "launcher" / "Zapret-Zen.exe"
     if not binary.exists():
         pytest.skip("launcher binary is not built in this checkout")
     data = binary.read_bytes()
-    pe = struct.unpack_from("<I", data, 0x3C)[0]
-    section_count = struct.unpack_from("<H", data, pe + 6)[0]
-    optional = pe + 24
-    magic = struct.unpack_from("<H", data, optional)[0]
-    dirs = optional + (112 if magic == 0x20B else 96)
-    resource_rva = struct.unpack_from("<II", data, dirs + 16)[0]
-    assert resource_rva, "no resource directory in the launcher"
-    # Manifest XML lives verbatim in the file; find and validate it.
-    start = data.find(b"<assembly xmlns=")
-    assert start != -1, "manifest not found in the launcher"
-    end = data.find(b"</assembly>", start) + len(b"</assembly>")
-    manifest = data[start:end].decode("utf-8", "replace")
-    version = re.search(r'assemblyIdentity type="win32" name="[^"]*" version="([^"]+)"', manifest).group(1)
-    # (2.1f shipped "2.1f.0.0" here, which Windows refuses to load.)
-    assert re.fullmatch(r"\d+\.\d+\.\d+\.\d+", version), version
-    assert "requestedExecutionLevel" in manifest
+    assert b"requestedExecutionLevel" not in data
+    assert b"<assembly xmlns=" not in data
 
 
 def test_launcher_has_no_console_subsystem() -> None:
@@ -71,3 +61,18 @@ def test_launcher_has_no_console_subsystem() -> None:
     optional = pe + 24
     subsystem = struct.unpack_from("<H", data, optional + 68)[0]
     assert subsystem == 2, "launcher must be a GUI (windows) subsystem binary"
+
+
+def test_launcher_has_icon_and_version_resources() -> None:
+    import struct
+
+    binary = Path(__file__).resolve().parents[1] / "native" / "launcher" / "Zapret-Zen.exe"
+    if not binary.exists():
+        pytest.skip("launcher binary is not built in this checkout")
+    data = binary.read_bytes()
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    optional = pe + 24
+    magic = struct.unpack_from("<H", data, optional)[0]
+    dirs = optional + (112 if magic == 0x20B else 96)
+    resource_rva = struct.unpack_from("<II", data, dirs + 16)[0]
+    assert resource_rva, "launcher lost its .rsrc section (icon/version info)"

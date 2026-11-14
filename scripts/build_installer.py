@@ -34,10 +34,10 @@ INSTALLER_ZIG = NATIVE / "installer" / "installer.zig"
 ICON = ROOT / "ui_assets" / "icons" / "app.ico"
 
 APP_NAME = "Zapret-Zen"
-VERSION = "2.1h"
+VERSION = "2.1i"
 # Windows assembly identities need four *numeric* parts: "2.1f.0.0" makes the
 # loader reject the exe with "parallel configuration is incorrect" (0xc0150004).
-VERSION_ASSEMBLY = "2.1.2.0"
+VERSION_ASSEMBLY = "2.1.3.0"
 VERSION_QUAD = VERSION_ASSEMBLY.replace(".", ",")
 
 
@@ -63,32 +63,20 @@ def _find_zig() -> str:
     )
 
 
-def _write_rc(path: Path, exe_name: str, description: str, *, require_admin: bool = False) -> Path:
-    """Emit a .rc script and compile it with `zig rc` (no windres needed)."""
+def _write_rc(path: Path, exe_name: str, description: str) -> Path:
+    """Emit a .rc script (icon + version info) and compile it with `zig rc`.
+
+    Deliberately no RT_MANIFEST: an embedded assembly manifest makes Windows run
+    the side-by-side (SxS) loader, and the "parallel configuration is incorrect"
+    dialog appeared on a real machine even with a valid manifest.  Nothing here
+    needs SxS - the controls are classic USER32 widgets - so the manifest is
+    dropped and the installer raises UAC itself (see installer.zig).
+    """
     icon = ICON.as_posix()
-    manifest = ROOT / "native" / "launcher" / "app.manifest"
-    manifest.write_text(
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-        '<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">\n'
-        f'  <assemblyIdentity type="win32" name="ZapretZen.{exe_name}" version="{VERSION_ASSEMBLY}"/>\n'
-        '  <dependency><dependentAssembly>\n'
-        '    <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"'
-        ' version="6.0.0.0" publicKeyToken="6595b64144ccf1df" language="*"/>\n'
-        '  </dependentAssembly></dependency>\n'
-        '  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges>\n'
-        f'    <requestedExecutionLevel level="{"requireAdministrator" if require_admin else "asInvoker"}" uiAccess="false"/>\n'
-        '  </requestedPrivileges></security></trustInfo>\n'
-        '  <application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings>\n'
-        '    <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>\n'
-        '  </windowsSettings></application>\n'
-        '</assembly>\n',
-        encoding="utf-8",
-    )
     rc_path = path.with_suffix(".rc")
     rc_path.write_text(
         f'#include <winver.h>\n'
-        f'1 ICON "{icon}"\n'
-        f'1 24 "{manifest.as_posix()}"\n\n'
+        f'1 ICON "{icon}"\n\n'
         f'VS_VERSION_INFO VERSIONINFO\n'
         f' FILEVERSION {VERSION_QUAD}\n'
         f' PRODUCTVERSION {VERSION_QUAD}\n'
@@ -116,7 +104,7 @@ def _build_launcher(zig: str, out: Path) -> None:
     res_path = _write_rc(out, APP_NAME, "Zapret-Zen — обход DPI для YouTube и Discord")
     cmd = [
         zig, "cc", "-target", "x86_64-windows-gnu", "-municode",
-        "-Wl,--subsystem,windows", "-O2",
+        "-Wl,--subsystem,windows", "-O2", "-static",
         "-o", str(out), str(LAUNCHER_C), str(res_path),
     ]
     subprocess.run(cmd, check=True, cwd=ROOT)
@@ -133,15 +121,14 @@ def _write_build_options(path: Path, *, embed: bool) -> None:
 
 
 def _build_installer(zig: str, out: Path, payload: Path | None, workdir: Path) -> None:
-    # A .res compiled from our own icon/manifest is linked into the setup exe:
-    # without requireAdministrator the installer cannot write to Program Files.
-    res_path = _write_rc(out, f"{APP_NAME}-setup",
-                         "Установщик Zapret-Zen", require_admin=True)
+    # A .res compiled from our own icon and version info (no manifest, see
+    # _write_rc) is linked into the setup exe.
+    res_path = _write_rc(out, f"{APP_NAME}-setup", "Установщик Zapret-Zen")
     options = workdir / "build_options.zig"
     _write_build_options(options, embed=payload is not None)
     cmd = [
         zig, "build-exe", "-target", "x86_64-windows-gnu", "-municode",
-        "--subsystem", "windows", "-O", "ReleaseSmall",
+        "--subsystem", "windows", "-O", "ReleaseSmall", "-static",
         "-femit-bin=" + str(out),
         str(res_path),
         "--dep", "build_options",

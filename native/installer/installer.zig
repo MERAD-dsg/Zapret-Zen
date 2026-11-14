@@ -157,6 +157,9 @@ const win = struct {
 
     pub extern "shell32" fn ShellExecuteW(?HWND, [*:0]const u16, [*:0]const u16, ?[*:0]const u16, ?[*:0]const u16, c_int) callconv(.winapi) ?HANDLE;
     pub extern "shell32" fn SHGetFolderPathW(?HWND, c_int, ?HANDLE, DWORD, [*]u16) callconv(.winapi) HRESULT;
+    // Exported by every supported Windows; used only to decide whether we need
+    // to re-launch ourselves elevated (no manifest in this exe by design).
+    pub extern "shell32" fn IsUserAnAdmin() callconv(.winapi) BOOL;
     pub extern "shell32" fn SHGetKnownFolderPath(*const GUID, DWORD, ?HANDLE, *[*:0]u16) callconv(.winapi) HRESULT;
 
     pub const GUID = extern struct { data1: u32, data2: u16, data3: u16, data4: [8]u8 };
@@ -363,6 +366,10 @@ fn materialise_payload() anyerror![]const u8 {
         return path;
     }
     return error.PayloadMissing;
+}
+
+fn is_admin() bool {
+    return win.IsUserAnAdmin() != 0;
 }
 
 fn dir_exists(path: []const u8) bool {
@@ -819,6 +826,25 @@ fn wnd_proc(hwnd: win.HWND, message: u32, wparam: win.WPARAM, lparam: win.LPARAM
     };
 }
 
+/// Raise an UAC prompt for ourselves and hand over to the elevated copy.
+///
+/// The exe intentionally carries no assembly manifest (SxS loading caused the
+/// "parallel configuration is incorrect" dialog on a real machine), so
+/// elevation is requested at runtime instead of via requireAdministrator.
+fn relaunch_elevated() bool {
+    var module: [32768]u16 = undefined;
+    const handle = win.GetModuleHandleW(null) orelse return false;
+    const length = win.GetModuleFileNameW(handle, &module, module.len);
+    if (length == 0 or length >= module.len) return false;
+    module[length] = 0;
+    const self_path = std.mem.sliceTo(@as([*:0]const u16, @ptrCast(&module)), 0);
+    const runas = std.unicode.utf8ToUtf16LeAllocZ(g_gpa, "runas") catch return false;
+    const result = win.ShellExecuteW(null, runas.ptr, @ptrCast(self_path.ptr), null, null, SW_SHOWNORMAL);
+    // ShellExecuteW returns a value > 32 on success; ERROR_CANCELLED (1223) means
+    // the user declined the prompt, which is not an error we should report.
+    return @intFromPtr(result) > 32 or @intFromPtr(result) == 5;
+}
+
 fn parse_flags() void {
     const cmd = std.mem.span(win.GetCommandLineW());
     const cmd_utf8 = std.unicode.utf16LeToUtf8Alloc(g_gpa, cmd) catch return;
@@ -845,6 +871,13 @@ export fn wWinMain(instance: win.HINSTANCE, prev: ?win.HINSTANCE, cmdline: ?[*:0
     defer g_arena.deinit();
 
     parse_flags();
+    if (!is_admin()) {
+        // Hand over to an elevated instance and quit; the elevated copy does the
+        // real work (writing into %ProgramFiles% needs administrator rights).
+        if (relaunch_elevated()) return 0;
+        message_box("Для установки нужны права администратора.\nЗапустите установщик от имени администратора.", 0x10);
+        return 1;
+    }
     compute_paths() catch {
         message_box("Не удалось определить папку установки. Запустите установщик обычным двойным щелчком.", 0x10);
         return 1;
