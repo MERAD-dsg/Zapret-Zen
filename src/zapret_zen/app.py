@@ -223,9 +223,13 @@ def _ensure_admin_windows(argv: list[str]) -> int:
     # Zapret-Zen.exe -> pythonw.exe, so an elevated relaunch must keep using
     # pythonw.exe: relaunching through python.exe leaves an empty black console
     # window sitting next to the main window for the whole session.
-    pythonw = _portable_pythonw_executable()
-    if pythonw is not None:
-        executable = str(pythonw)
+    # Only keep the console-less interpreter when we already run under it: a
+    # deliberate console run (run_zapret_zen_console.cmd) must elevate with a
+    # console too, otherwise the diagnostic output disappears.
+    if Path(sys.executable).name.lower() == "pythonw.exe":
+        pythonw = _portable_pythonw_executable()
+        if pythonw is not None:
+            executable = str(pythonw)
     params = " ".join(f'"{arg}"' if " " in arg else arg for arg in params_args)
     _startup_trace(f"run: relaunch elevated executable={executable} params={params}")
     result = ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, params, None, 1)
