@@ -6107,6 +6107,11 @@ class MainWindow(QMainWindow):
                 continue
             if state.status != "error" or not state.last_error:
                 continue
+            if "restarting in" in state.last_error:
+                # Transient supervisor restarts are not component failures: the
+                # old code popped a "Python"-branded balloon with the raw
+                # "winws exited; restarting in 15s" text on every blip.
+                continue
             translated_error = self._translate_component_error(state.last_error)
             self._toast_notification(
                 "error",
