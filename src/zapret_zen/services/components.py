@@ -6,7 +6,6 @@ import json
 import os
 import re
 import secrets
-import shlex
 import socket
 import subprocess
 import sys
@@ -26,7 +25,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 
 from zapret_zen.domain import ComponentDefinition, ComponentState
-from zapret_zen.runtime_env import is_packaged_runtime
+from zapret_zen.runtime_env import is_packaged_runtime, packaged_install_root, packaged_resource_root
 from zapret_zen.services.github_network import GitHubNetworkClient, is_recoverable_github_error
 from zapret_zen.services.logging_service import LoggingManager
 from zapret_zen.services.process_compat import decode_process_output
@@ -44,6 +43,7 @@ from zapret_zen.services.zapret_command import (
     apply_youtube_quic_guard,
     exclude_udp_ports,
     missing_command_files,
+    split_windows_command_line,
     uses_quic_bypass_data,
 )
 
@@ -846,7 +846,10 @@ class ProcessManager:
             if not active_script.exists():
                 raise FileNotFoundError(f"Selected general was not materialized: {active_script}")
             if not (bin_dir / "winws.exe").exists():
-                raise FileNotFoundError(f"winws.exe was not materialized: {bin_dir / 'winws.exe'}")
+                # Repair instead of failing: the engine can be missing because the
+                # active copy was stripped or the antivirus quarantined the file.
+                if self._restore_bundled_winws(bin_dir) is None:
+                    raise FileNotFoundError(f"winws.exe was not materialized: {bin_dir / 'winws.exe'}")
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
             self._apply_quic_policy(winws_command)
             winws_command = self._apply_selected_service_command_extensions(winws_command, lists_dir=lists_dir)
@@ -864,14 +867,11 @@ class ProcessManager:
                 self._states[component_id] = state
                 self.logging.log("error", "Zapret command parse failed", script=str(active_script))
                 return state
-            process = subprocess.Popen(
-                winws_command,
-                cwd=str(bin_dir),
-                creationflags=self._creationflags,
-                startupinfo=self._startupinfo,
-                stdout=self._open_source_log_stream("zapret"),
-                stderr=subprocess.STDOUT,
-            )
+            # winws is launched by absolute path; a missing/mis-resolved binary
+            # surfaces as a bare "[WinError 2] Не удаётся найти указанный файл"
+            # dialog, so verify (and repair) the path before spawning.
+            winws_command = self._ensure_winws_executable(winws_command, bin_dir=bin_dir)
+            process = self._spawn_winws(winws_command, bin_dir=bin_dir)
             if self._job:
                 self._job.assign_pid(process.pid)
             self._processes[component_id] = process
@@ -909,6 +909,26 @@ class ProcessManager:
                     last_error="Administrator rights are required for winws/WinDivert.",
                 )
                 self.logging.log("error", "Zapret start failed: admin required")
+            elif getattr(error, "winerror", 0) == 2 or getattr(error, "errno", None) == 2:
+                # A raw "[WinError 2] Не удаётся найти указанный файл" tells the
+                # user nothing.  Name the file the app could not spawn.
+                missing = self._guess_missing_launch_file(active_root, error)
+                state = ComponentState(
+                    component_id=component_id,
+                    status="error",
+                    last_error=(
+                        f"Не найден файл «{missing}», без него winws не запускается. "
+                        "Переустановите приложение (вероятно, архив распакован не полностью) "
+                        "и добавьте папку программы в исключения антивируса."
+                    ),
+                )
+                self.logging.log(
+                    "error",
+                    "Zapret start failed: executable not found",
+                    missing=missing,
+                    cwd=str(bin_dir),
+                    error=str(error),
+                )
             else:
                 state = ComponentState(component_id=component_id, status="error", last_error=str(error))
                 self.logging.log("error", "Zapret start failed", error=str(error))
@@ -987,7 +1007,10 @@ class ProcessManager:
             if not active_script.exists():
                 raise FileNotFoundError(f"Selected general was not materialized: {active_script}")
             if not (bin_dir / "winws.exe").exists():
-                raise FileNotFoundError(f"winws.exe was not materialized: {bin_dir / 'winws.exe'}")
+                # Repair instead of failing: the engine can be missing because the
+                # active copy was stripped or the antivirus quarantined the file.
+                if self._restore_bundled_winws(bin_dir) is None:
+                    raise FileNotFoundError(f"winws.exe was not materialized: {bin_dir / 'winws.exe'}")
             winws_command = self._extract_winws_command(active_script, bin_dir=bin_dir, lists_dir=lists_dir)
             self._apply_quic_policy(winws_command)
             winws_command = self._apply_selected_service_command_extensions(winws_command, lists_dir=lists_dir)
@@ -1004,14 +1027,8 @@ class ProcessManager:
                 )
                 self._states[component_id] = state
                 return state
-            process = subprocess.Popen(
-                winws_command,
-                cwd=str(bin_dir),
-                creationflags=self._creationflags,
-                startupinfo=self._startupinfo,
-                stdout=self._open_source_log_stream("zapret"),
-                stderr=subprocess.STDOUT,
-            )
+            winws_command = self._ensure_winws_executable(winws_command, bin_dir=bin_dir)
+            process = self._spawn_winws(winws_command, bin_dir=bin_dir)
             if self._job:
                 self._job.assign_pid(process.pid)
             self._processes[component_id] = process
@@ -1067,10 +1084,10 @@ class ProcessManager:
         for line in lines:
             if "winws.exe" not in line.lower():
                 continue
-            try:
-                parts = shlex.split(line, posix=False)
-            except ValueError:
-                continue
+            # NOT shlex: it splits "--hostlist=\"C:\\Program Files\\...\"" into
+            # two arguments on Windows layouts, and winws then refuses to start
+            # with a truncated hostlist path.
+            parts = split_windows_command_line(line)
             if not parts:
                 continue
             winws_idx = next((i for i, item in enumerate(parts) if "winws.exe" in item.lower()), -1)
@@ -1539,15 +1556,49 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             tg_pool_size=int(settings.tg_proxy_pool_size or 4),
         )
         self.logging.log("info", "TG WS Proxy starting", command=" ".join(command))
-        process = subprocess.Popen(
-            command,
-            cwd=str(self.storage.paths.install_root),
-            creationflags=self._creationflags,
-            startupinfo=self._startupinfo,
-            env=self._build_worker_env(),
-            stdout=self._open_source_log_stream("tg-ws-proxy"),
-            stderr=subprocess.STDOUT,
-        )
+        runtime_missing = self._missing_tg_runtime_files()
+        if runtime_missing:
+            error_hint = (
+                "Не найдены файлы TG WS Proxy в папке runtime: "
+                + ", ".join(runtime_missing)
+                + ". Переустановите приложение (архив распакован не полностью)."
+            )
+            self.logging.log("error", "TG WS Proxy runtime is incomplete", missing=runtime_missing)
+            state = ComponentState(component_id=component_id, status="error", last_error=error_hint)
+            self._states[component_id] = state
+            return state
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=str(self.storage.paths.install_root),
+                creationflags=self._creationflags,
+                startupinfo=self._startupinfo,
+                env=self._build_worker_env(),
+                stdout=self._open_source_log_stream("tg-ws-proxy"),
+                stderr=subprocess.STDOUT,
+            )
+        except OSError as error:
+            # A raw "[WinError 2] Не удается найти указанный файл" tells the user
+            # nothing: name the interpreter that could not be spawned and the
+            # place the app was looking for it.
+            executable = command[0] if command else ""
+            hint = f"Не удалось запустить TG WS Proxy: {executable or 'python'} не найден"
+            if getattr(error, "winerror", 0) == 2 or getattr(error, "errno", None) == 2:
+                hint = (
+                    f"Не удалось запустить TG WS Proxy: файл «{executable}» не найден. "
+                    "Переустановите приложение — вероятно, архив распакован не полностью."
+                )
+            self.logging.log(
+                "error",
+                "TG WS Proxy process could not be started",
+                executable=executable,
+                cwd=str(self.storage.paths.install_root),
+                error=str(error),
+            )
+            self._close_source_log_stream("tg-ws-proxy")
+            state = ComponentState(component_id=component_id, status="error", last_error=hint)
+            self._states[component_id] = state
+            return state
         listen_host = settings.tg_proxy_host
         listen_port = int(settings.tg_proxy_port)
         ready = False
@@ -1885,6 +1936,125 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             env["PYTHONPATH"] = os.pathsep.join(parts)
         return env
 
+    def _ensure_winws_executable(self, command: list[str], *, bin_dir: Path) -> list[str]:
+        """Return a command whose first argument really exists on disk.
+
+        Two things used to reach CreateProcess as a non-existent file and surface
+        as a bare "[WinError 2] Не удаётся найти указанный файл" dialog:
+          * a strategy that resolves ``winws.exe`` outside the materialized
+            runtime folder;
+          * a bin folder whose engine was removed (antivirus quarantine, a
+            half-extracted archive).
+        Both are repaired here from the pristine ``runtime`` copy that ships with
+        the app, and the substitution is logged.
+        """
+        if not command:
+            return command
+        executable = Path(command[0])
+        if executable.is_file():
+            return command
+        fallback = self._restore_bundled_winws(bin_dir)
+        if fallback is not None:
+            self.logging.log(
+                "warning",
+                "Strategy pointed at a missing winws, using the bundled engine",
+                requested=str(executable),
+                used=str(fallback),
+            )
+            return [str(fallback), *command[1:]]
+        return command
+
+    def _restore_bundled_winws(self, bin_dir: Path, *, force: bool = False) -> Path | None:
+        """Copy the audited engine back when the active runtime lost it.
+
+        ``force`` overwrites existing files: an antivirus can leave a quarantined
+        placeholder behind that exists on disk but cannot be executed, which is
+        reported as "[WinError 2] Не удаётся найти указанный файл".
+        """
+        target = bin_dir / "winws.exe"
+        if target.is_file() and not force:
+            return target
+        source_root = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "bin"
+        if not source_root.is_dir():
+            return None
+        needed = ("winws.exe", "WinDivert.dll", "WinDivert64.sys", "cygwin1.dll")
+        try:
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            for name in needed:
+                source = source_root / name
+                destination = bin_dir / name
+                if source.is_file() and (force or not destination.exists()):
+                    shutil.copy2(source, destination)
+        except Exception as error:
+            self.logging.log("warning", "Failed to restore winws engine", error=str(error))
+            return None
+        if target.is_file():
+            self.logging.log("info", "Restored missing winws engine from the bundled runtime", path=str(target))
+            return target
+        return None
+
+    def _spawn_winws(self, command: list[str], *, bin_dir: Path):
+        """Start winws, repairing a quarantined engine once if the launch fails."""
+        self.logging.log("info", "Launching winws", executable=command[0] if command else "", cwd=str(bin_dir))
+        try:
+            return subprocess.Popen(
+                command,
+                cwd=str(bin_dir),
+                creationflags=self._creationflags,
+                startupinfo=self._startupinfo,
+                stdout=self._open_source_log_stream("zapret"),
+                stderr=subprocess.STDOUT,
+            )
+        except OSError as error:
+            if getattr(error, "winerror", 0) != 2 and getattr(error, "errno", None) != 2:
+                raise
+            # The file is present in the listing but Windows refuses to execute
+            # it: the usual cause is an antivirus quarantine placeholder.  Put a
+            # pristine copy in place and try exactly once more.
+            self.logging.log(
+                "warning",
+                "winws could not be started, re-copying the engine and retrying",
+                executable=command[0] if command else "",
+                error=str(error),
+            )
+            restored = self._restore_bundled_winws(bin_dir, force=True)
+            if restored is None:
+                raise
+            return subprocess.Popen(
+                [str(restored), *command[1:]],
+                cwd=str(bin_dir),
+                creationflags=self._creationflags,
+                startupinfo=self._startupinfo,
+                stdout=self._open_source_log_stream("zapret"),
+                stderr=subprocess.STDOUT,
+            )
+
+    def _guess_missing_launch_file(self, active_root: Path | None, error: OSError) -> str:
+        """Name the file CreateProcess most likely failed on."""
+        filename = getattr(error, "filename", None)
+        if filename:
+            return str(filename)
+        if active_root is not None:
+            return str(active_root / "bin" / "winws.exe")
+        return "winws.exe"
+
+    def _missing_tg_runtime_files(self) -> list[str]:
+        """Files the bundled TG WS Proxy cannot start without."""
+        install_root = self.storage.paths.install_root
+        if is_packaged_runtime():
+            candidates = [packaged_install_root() / "runtime" / "tg-ws-proxy",
+                          packaged_resource_root() / "runtime" / "tg-ws-proxy"]
+        else:
+            candidates = [install_root / "runtime" / "tg-ws-proxy"]
+        repo = next((path for path in candidates if (path / "proxy" / "tg_ws_proxy.py").exists()), None)
+        if repo is None:
+            return ["runtime\\tg-ws-proxy\\proxy\\tg_ws_proxy.py"]
+        missing: list[str] = []
+        for relative in ("proxy/__init__.py", "proxy/tg_ws_proxy.py", "utils/__init__.py"):
+            if not (repo / relative).exists():
+                missing.append(relative.replace("/", "\\"))
+        return missing
+
     def _worker_python_executable(self) -> str:
         if is_packaged_runtime():
             return sys.executable
@@ -1999,6 +2169,11 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         }
         for kind, filename in mapping.items():
             target = lists_dir / filename
+            if not target.exists():
+                # The runtime builder no longer materializes user list files;
+                # writing here would create a directory instead of a file and
+                # break the next winws start with FileNotFoundError.
+                continue
             values = self._read_list_lines(target)
             override = raw.get(kind, {}) if isinstance(raw, dict) else {}
             removed = {str(item).strip() for item in list((override or {}).get("removed", []) or []) if str(item).strip()}
@@ -3223,13 +3398,32 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         # NB: no text=True — Windows tools print the OEM codepage, while
         # Python 3.14+ would decode it as UTF-8 and crash the reader
         # thread (stdout becomes None). Decode manually instead.
-        proc = subprocess.run(
-            command,
-            capture_output=True,
-            check=False,
-            creationflags=self._creationflags,
-            startupinfo=self._startupinfo,
-        )
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                creationflags=self._creationflags,
+                startupinfo=self._startupinfo,
+            )
+        except OSError as error:
+            # A missing console tool (taskkill/sc/netsh/tasklist absent from
+            # PATH, e.g. under a stripped environment) used to bubble up as
+            # "[WinError 2] Не удаётся найти указанный файл" and was reported as
+            # "the component failed to start", which pointed at the wrong
+            # culprit.  A helper failing must never look like winws failing.
+            self.logging.log(
+                "warning",
+                "Helper command could not be started",
+                command=command[:2],
+                error=str(error),
+            )
+            return subprocess.CompletedProcess(
+                command,
+                -1,
+                stdout="",
+                stderr=f"{error}",
+            )
         return subprocess.CompletedProcess(
             command,
             proc.returncode,

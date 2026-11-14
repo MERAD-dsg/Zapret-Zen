@@ -6308,6 +6308,13 @@ class MainWindow(QMainWindow):
                 "winws не запустился. Запустите приложение от имени администратора и проверьте исключения антивируса для WinDivert.",
                 "winws did not start. Run the app as Administrator and check antivirus exclusions for WinDivert.",
             )
+        if "не найден файл" in lowered and "winws" in lowered:
+            return self._t(
+                "Не найден исполняемый файл winws. Переустановите приложение: вероятно, "
+                "архив распакован не полностью или антивирус удалил часть файлов.",
+                "The winws executable is missing. Reinstall: the archive was probably "
+                "not extracted completely or the antivirus removed some files.",
+            )
         if "administrator rights are required" in lowered:
             return self._t(
                 "Для winws/WinDivert нужны права администратора.",

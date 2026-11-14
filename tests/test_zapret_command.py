@@ -229,3 +229,57 @@ def test_uses_quic_bypass_data_ignores_youtube_only_profile() -> None:
         "--dpi-desync=fake",
     ]
     assert uses_quic_bypass_data(youtube_only) is False
+
+
+# --- Windows command-line splitting -------------------------------------------
+# Regression: shlex.split(..., posix=False) used to break every quoted path that
+# contains a space, so "--hostlist=C:\Program Files\...\list-general.txt" reached
+# winws as two arguments and the app reported "[WinError 2] Не удаётся найти
+# указанный файл" instead of starting the bypass.
+
+from zapret_zen.services.zapret_command import split_windows_command_line
+
+
+def test_split_windows_command_line_keeps_quoted_path_with_space():
+    line = r'--hostlist="C:\Program Files\Zapret-Zen\lists\list-general.txt" --new'
+    assert split_windows_command_line(line) == [
+        r"--hostlist=C:\Program Files\Zapret-Zen\lists\list-general.txt",
+        "--new",
+    ]
+
+
+def test_split_windows_command_line_handles_start_prefix_and_exe():
+    line = (
+        r'start "zapret: general" /min "C:\Program Files\Zapret-Zen\merged_runtime\_active_0\bin\winws.exe"'
+        r" --wf-tcp=80,443"
+    )
+    assert split_windows_command_line(line) == [
+        "start",
+        "zapret: general",
+        "/min",
+        r"C:\Program Files\Zapret-Zen\merged_runtime\_active_0\bin\winws.exe",
+        "--wf-tcp=80,443",
+    ]
+
+
+def test_split_windows_command_line_supports_multiple_quoted_values():
+    line = (
+        r'--dpi-desync-fake-quic="C:\Users\A B\bin\q.bin"'
+        r' --dpi-desync-fake-tls="C:\Users\A B\bin\t.bin"'
+    )
+    assert split_windows_command_line(line) == [
+        r"--dpi-desync-fake-quic=C:\Users\A B\bin\q.bin",
+        r"--dpi-desync-fake-tls=C:\Users\A B\bin\t.bin",
+    ]
+
+
+def test_split_windows_command_line_keeps_empty_argument():
+    assert split_windows_command_line(r'a "" b') == ["a", "", "b"]
+
+
+def test_missing_command_files_accepts_paths_with_spaces(tmp_path: Path):
+    lists = tmp_path / "Program Files" / "lists"
+    lists.mkdir(parents=True)
+    hostlist = lists / "list-general.txt"
+    hostlist.write_text("youtube.com\n", encoding="utf-8")
+    assert missing_command_files(["winws.exe", f"--hostlist={hostlist}"]) == []

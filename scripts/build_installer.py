@@ -34,10 +34,10 @@ INSTALLER_ZIG = NATIVE / "installer" / "installer.zig"
 ICON = ROOT / "ui_assets" / "icons" / "app.ico"
 
 APP_NAME = "Zapret-Zen"
-VERSION = "2.1i"
+VERSION = "2.1j"
 # Windows assembly identities need four *numeric* parts: "2.1f.0.0" makes the
 # loader reject the exe with "parallel configuration is incorrect" (0xc0150004).
-VERSION_ASSEMBLY = "2.1.3.0"
+VERSION_ASSEMBLY = "2.1.4.0"
 VERSION_QUAD = VERSION_ASSEMBLY.replace(".", ",")
 
 

@@ -96,7 +96,7 @@ SHIBOKEN_KEEP_FILES = {
 TRIM_DIR_PARTS = ("/tests/", "/test/", "/include/", "/lib/cmake/", ".dist-info/")
 
 
-PORTABLE_README = """Zapret-Zen 2.1e - portable build (Windows x64)
+PORTABLE_README = """Zapret-Zen 2.1j - portable build (Windows x64)
 ================================================
 
 Как запустить
@@ -118,7 +118,7 @@ PORTABLE_README = """Zapret-Zen 2.1e - portable build (Windows x64)
 * python.exe / python311.zip — официальный Windows embeddable Python 3.11.9.
 * site-packages — зафиксированные колёса: PySide6 6.12, cryptography 50, httpx/h2,
   pydivert, pypresence (лишние части Qt вырезаны для размера).
-* src\\zapret_zen — исходники приложения (версия 2.1e).
+* src\\zapret_zen — исходники приложения (версия 2.1j).
 * runtime\\zapret-discord-youtube — стратегии general*.bat и winws.exe.
 * runtime\\tg-ws-proxy — TG WS Proxy (запускается из исходников).
 * portable.flag — включает портативный режим (настройки и логи рядом).

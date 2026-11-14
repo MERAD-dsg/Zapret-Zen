@@ -252,6 +252,73 @@ def apply_youtube_quic_guard(
     return join_profiles(global_args, profiles)
 
 
+def split_windows_command_line(text: str) -> list[str]:
+    """Split a Windows command line the way CommandLineToArgvW does.
+
+    ``shlex.split(..., posix=False)`` looks like the obvious tool, but it breaks
+    the single most common argument in these scripts: a quoted path that contains
+    a space (``--hostlist="C:\\Program Files\\Zapret-Zen\\lists\\x.txt"``)
+    becomes ``--hostlist="C:\\Program`` + ``Files\\...\\x.txt"``.  winws then
+    receives a truncated hostlist path and refuses to start.
+
+    This parser follows the Windows rules instead:
+      * backslashes are literal unless they precede a double quote;
+      * a double quote toggles quoting and is removed, except for the special
+        ``""`` empty-argument case;
+      * unquoted whitespace separates arguments.
+    """
+    args: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+    has_token = False
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "\\":
+            run_start = index
+            while index < length and text[index] == "\\":
+                index += 1
+            run_length = index - run_start
+            if index < length and text[index] == '"':
+                # 2n backslashes + quote -> n backslashes and a literal quote;
+                # 2n+1 backslashes + quote -> n backslashes and a quote toggle.
+                current.append("\\" * (run_length // 2))
+                has_token = True
+                if run_length % 2:
+                    current.append('"')
+                    index += 1  # consume the escaped quote
+                else:
+                    in_quotes = not in_quotes
+                    index += 1  # consume the delimiter quote
+                continue
+            current.append("\\" * run_length)
+            has_token = True
+            continue
+        if char == '"':
+            if in_quotes and index + 1 < length and text[index + 1] == '"':
+                current.append('"')
+                has_token = True
+                index += 2
+                continue
+            in_quotes = not in_quotes
+            has_token = True
+            index += 1
+            continue
+        if char in " \t" and not in_quotes:
+            if has_token:
+                args.append("".join(current))
+                current = []
+                has_token = False
+            index += 1
+            continue
+        current.append(char)
+        has_token = True
+        index += 1
+    if has_token:
+        args.append("".join(current))
+    return args
+
 def missing_command_files(command: list[str]) -> list[str]:
     """Return missing file arguments that would make winws exit at startup."""
     missing: list[str] = []

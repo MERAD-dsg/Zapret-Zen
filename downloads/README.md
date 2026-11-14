@@ -1,25 +1,25 @@
-# Zapret-Zen 2.1i — установщик и портативная сборка (Windows x64)
+# Zapret-Zen 2.1j — установщик и портативная сборка (Windows x64)
 
-Два файла, оба уже содержат все исправления 2.1f–2.1i:
+Два файла, оба уже содержат все исправления 2.1f–2.1j:
 
 | Файл | Размер | SHA-256 |
 | --- | --- | --- |
-| `Zapret-Zen-2.1i-setup.exe` — установщик «в один клик» (внутри уже лежит архив) | 42 440 192 байт (~40,5 МБ) | `369b31c002c8377666f80ec8e8c5ffaf17e1b405eeb2f3f63b1de87074e63f8e` |
-| `Zapret-Zen-2.1i-portable.zip` — портативная папка целиком | 41 694 413 байт (~39,8 МБ) | `a43ca5425d3c61e6d16e9cb105a6af99a1c5d845e8e12dc27e3115b6d4217fe2` |
+| `Zapret-Zen-2.1j-setup.exe` — установщик «в один клик» (внутри уже лежит архив) | 42 443 776 байт (~40,5 МБ) | `89d560b2bd5e29b34aa79a28fad7eff025e406e48cec2201624f6c8e469ce284` |
+| `Zapret-Zen-2.1j-portable.zip` — портативная папка целиком | 41 697 961 байт (~39,8 МБ) | `ab2803c4835901699ca6e0a790871353a1a83871f8c3a279774e97236b07940a` |
 
 ## Скачать
 
 Прямые ссылки (ветка `arena/c452d19e-zapret-zen`):
 
 * установщик:
-  <https://github.com/MERAD-dsg/Zapret-Zen/raw/refs/heads/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1i-setup.exe>
+  <https://github.com/MERAD-dsg/Zapret-Zen/raw/refs/heads/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1j-setup.exe>
 * портативный архив:
-  <https://github.com/MERAD-dsg/Zapret-Zen/raw/refs/heads/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1i-portable.zip>
+  <https://github.com/MERAD-dsg/Zapret-Zen/raw/refs/heads/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1j-portable.zip>
 
 Страницы файлов (кнопка «Download raw file»), если прямая ссылка не открывается:
 
-* <https://github.com/MERAD-dsg/Zapret-Zen/blob/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1i-setup.exe>
-* <https://github.com/MERAD-dsg/Zapret-Zen/blob/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1i-portable.zip>
+* <https://github.com/MERAD-dsg/Zapret-Zen/blob/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1j-setup.exe>
+* <https://github.com/MERAD-dsg/Zapret-Zen/blob/arena/c452d19e-zapret-zen/downloads/Zapret-Zen-2.1j-portable.zip>
 
 Архив и установщик лежат в git намеренно: `uploads.github.com` (загрузка
 ассетов в релизы) в среде сборки заблокирован, релиз-ассет создать не удалось.
@@ -47,7 +47,7 @@
 4. **Discord Rich Presence выключен по умолчанию** (включается галочкой
    «Discord Rich Presence» в настройках).
 
-## Что исправлено в 2.1g/2.1i (после вашего отчёта об ошибке запуска)
+## Что исправлено в 2.1g–2.1j (после ваших отчётов об ошибке запуска)
 
 1. **«Параллельная конфигурация неправильна» при запуске `Zapret-Zen.exe`.**
    Причина в манифесте лаунчера: версия сборки была записана как `2.1f.0.0`, а
@@ -77,14 +77,52 @@
    зависимости `Microsoft.Windows.Common-Controls` (используются классические
    контролы USER32 — визуально отличается только оформление кнопок).
 
+## Что исправлено в 2.1j (обход не включался: «Компонент не запустился — Zapret: [WinError 2]»)
+
+Скриншот показал, что падал не TG WS Proxy, а сам **zapret**: в диалоге было
+`Zapret: [WinError 2] Не удаётся найти указанный файл`. `WinError 2` — это
+`ERROR_FILE_NOT_FOUND` от `CreateProcess`: Windows не нашёл **файл, который
+просили запустить**. Найдены и устранены реальные причины:
+
+1. **Ломался разбор командной строки стратегий.** `general*.bat` содержит пути в
+   кавычках с пробелом — `--hostlist="%LISTS%list-general.txt"`. Разбор через
+   `shlex` (режим posix=False) резал такой аргумент на два:
+   `--hostlist="C:\Program` и `Files\Zapret-Zen\...list-general.txt"`. В
+   результате в winws уходил обрезанный путь, а на Windows-раскладке (в отличие
+   от Linux-сборки, где я это и проверял раньше) это первый же аргумент с
+   пробелом. Теперь используется собственный разборщик по правилам Windows
+   (`CommandLineToArgvW`), кавычки и обратные слэши обрабатываются корректно.
+2. **Проверка «winws.exe на месте» срабатывала слишком поздно.** Если движок
+   отсутствует в активной копии (антивирус поместил в карантин, распаковка не
+   завершилась), приложение падало с сырым `[WinError 2]`. Теперь движок
+   (winws.exe + WinDivert.dll + WinDivert64.sys + cygwin1.dll) восстанавливается
+   из исходной папки `runtime` и запуск повторяется.
+3. **Карантинный «пустышка»-файл.** Бывает, файл в списке есть, а Windows его не
+   запускает. В этом случае приложение один раз перезаписывает движок чистой
+   копией и пробует снова, а не показывает ошибку.
+4. **Понятный текст вместо кода ошибки.** Если файла действительно нет, диалог
+   называет **какой именно** файл не найден и что делать (переустановить,
+   добавить папку в исключения антивируса) — вместо `[WinError 2]`.
+5. **Вспомогательные утилиты больше не «роняют» компонент.** Раньше отсутствие
+   `tasklist`/`taskkill`/`sc`/`netsh` в PATH давало `[WinError 2]` и
+   записывалось как «компонент не запустился», хотя winws был ни при чём.
+6. **TG WS Proxy**: перед запуском проверяется, что файлы прокси
+   (`runtime\tg-ws-proxy\proxy\tg_ws_proxy.py` и `utils`) на месте, а ошибка
+   запуска называет конкретный отсутствующий файл.
+
+Если после 2.1j сообщение всё ещё появится, пришлите, пожалуйста, файл
+`%ProgramFiles%\Zapret-Zen\logs\tg_worker_error.log` и последние строки
+`%ProgramFiles%\Zapret-Zen\logs\zapret.log` — в них теперь пишется точное имя
+ненайденного файла и рабочая папка запуска.
+
 ## Установка (setup.exe)
 
-1. Запустить `Zapret-Zen-2.1i-setup.exe`. Если Windows покажет «SmartScreen» —
+1. Запустить `Zapret-Zen-2.1j-setup.exe`. Если Windows покажет «SmartScreen» —
    «Подробнее» → «Выполнить в любом случае» (файл не подписан).
 2. Установка идёт в `%ProgramFiles%\Zapret-Zen`, создаётся ярлык в меню «Пуск»
    и запись «Программы и компоненты» → «Удалить».
 3. Галочка «Запустить Zapret-Zen после установки» — по желанию.
-4. Тихая установка: `Zapret-Zen-2.1i-setup.exe /S`.
+4. Тихая установка: `Zapret-Zen-2.1j-setup.exe /S`.
 5. Ярлык «Zapret-Zen» появляется на рабочем столе (и в меню «Пуск»).
 6. Удаление: «Программы и компоненты» → Zapret-Zen → Удалить (или
    `"%ProgramFiles%\Zapret-Zen\Zapret-Zen.exe" --uninstall`). Удаляются ярлык,
@@ -102,8 +140,8 @@
 ## Проверка целостности
 
 ```powershell
-Get-FileHash .\Zapret-Zen-2.1i-setup.exe -Algorithm SHA256
-Get-FileHash .\Zapret-Zen-2.1i-portable.zip -Algorithm SHA256
+Get-FileHash .\Zapret-Zen-2.1j-setup.exe -Algorithm SHA256
+Get-FileHash .\Zapret-Zen-2.1j-portable.zip -Algorithm SHA256
 ```
 
 Значения должны совпасть с таблицей выше (они же лежат в `*.sha256`).
@@ -114,8 +152,8 @@ Get-FileHash .\Zapret-Zen-2.1i-portable.zip -Algorithm SHA256
 python scripts/setup_portable_cache.py                 # embeddable Python + колёса
 pip install ziglang                                    # кросс-компилятор для .exe
 python scripts/build_installer.py --prepare            # native/launcher/Zapret-Zen.exe
-python scripts/build_portable.py --zip dist/Zapret-Zen-2.1i-portable.zip \
-    --zip-prefix Zapret-Zen-2.1i-portable
-python scripts/build_installer.py --payload dist/Zapret-Zen-2.1i-portable.zip \
-    --out dist_native                                  # Zapret-Zen-2.1i-setup.exe
+python scripts/build_portable.py --zip dist/Zapret-Zen-2.1j-portable.zip \
+    --zip-prefix Zapret-Zen-2.1j-portable
+python scripts/build_installer.py --payload dist/Zapret-Zen-2.1j-portable.zip \
+    --out dist_native                                  # Zapret-Zen-2.1j-setup.exe
 ```
