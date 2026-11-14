@@ -365,6 +365,46 @@ fn materialise_payload() anyerror![]const u8 {
     return error.PayloadMissing;
 }
 
+fn dir_exists(path: []const u8) bool {
+    var dir = std.Io.Dir.cwd().openDir(g_io, path, .{}) catch return false;
+    dir.close(g_io);
+    return true;
+}
+
+fn dir_is_empty(path: []const u8) bool {
+    var dir = std.Io.Dir.cwd().openDir(g_io, path, .{}) catch return true;
+    defer dir.close(g_io);
+    var iterator = dir.iterate();
+    const entry = iterator.next(g_io) catch return false;
+    return entry == null;
+}
+
+fn clear_previous_install() void {
+    // Only touch a directory that is either empty or a previous Zapret-Zen
+    // install (recognisable by pythonw.exe / Zapret-Zen.exe).  Anything else is
+    // left alone so the installer can never delete unrelated files.
+    if (!dir_exists(g_install_utf8)) return;
+    const looks_like_previous = looks_like_zapret_install(g_install_utf8);
+    if (!looks_like_previous and !dir_is_empty(g_install_utf8)) {
+        set_control_text(g_status, "В папке установки уже есть посторонние файлы — распаковка поверх.");
+        return;
+    }
+    if (looks_like_previous) {
+        set_control_text(g_status, "Удаление предыдущей версии…");
+        std.Io.Dir.cwd().deleteTree(g_io, g_install_utf8) catch {};
+    }
+}
+
+fn looks_like_zapret_install(path: []const u8) bool {
+    const markers = [_][]const u8{ "\\Zapret-Zen.exe", "\\pythonw.exe", "\\python311.dll" };
+    for (markers) |marker| {
+        const candidate = std.fmt.allocPrint(g_gpa, "{s}{s}", .{ path, marker }) catch continue;
+        std.Io.Dir.cwd().access(g_io, candidate, .{}) catch continue;
+        return true;
+    }
+    return false;
+}
+
 fn set_progress(value: f32) void {
     g_progress = std.math.clamp(value, 0.0, 1.0);
     if (g_hwnd) |hwnd| _ = win.InvalidateRect(hwnd, null, 0);
@@ -383,8 +423,28 @@ fn extract_all(payload: []const u8, dest: []const u8) !void {
     var filename_buf: [std.fs.max_path_bytes]u8 = undefined;
     const total = @max(iterator.cd_record_count, 1);
     var index: u64 = 0;
+    // The portable archive wraps everything in a single top-level folder
+    // ("Zapret-Zen-2.1f-portable/").  Extracting it verbatim used to install
+    // the app as %ProgramFiles%\Zapret-Zen\Zapret-Zen-2.1f-portable\..., which
+    // broke shortcut targets and the uninstaller, so that prefix is stripped.
+    var prefix_buf: [512]u8 = undefined;
+    var prefix_len: usize = 0;
+    var prefix_known = false;
     while (try iterator.next()) |entry| {
-        try entry.extract(&reader, .{ .allow_backslashes = true }, &filename_buf, dir);
+        const name = try entry.getFilename(&reader, &filename_buf, .{ .allow_backslashes = true });
+        var relative = name;
+        if (!prefix_known) {
+            prefix_known = true;
+            if (std.mem.indexOfScalar(u8, name, '/')) |slash| {
+                prefix_len = @min(slash + 1, prefix_buf.len);
+                @memcpy(prefix_buf[0..prefix_len], name[0..prefix_len]);
+            }
+        }
+        if (prefix_len > 0 and relative.len >= prefix_len and std.mem.eql(u8, relative[0..prefix_len], prefix_buf[0..prefix_len])) {
+            relative = relative[prefix_len..];
+        }
+        if (relative.len == 0) continue;
+        try extract_entry(&reader, entry, relative, dir);
         index += 1;
         if (index % 8 == 0 or index == total) {
             set_progress(@as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(total)));
@@ -393,28 +453,69 @@ fn extract_all(payload: []const u8, dest: []const u8) !void {
     set_progress(1.0);
 }
 
-/// Create the Start-menu shortcut through the shell COM interface, falling back
-/// to a PowerShell one-liner when COM is unavailable (very old Windows).
+/// Extract one entry under a caller-chosen relative path.
+fn extract_entry(reader: *std.Io.File.Reader, entry: std.zip.Iterator.Entry, relative: []const u8, dir: std.Io.Dir) !void {
+    const io = reader.io;
+    if (relative[relative.len - 1] == '/') {
+        try dir.createDirPath(io, relative[0 .. relative.len - 1]);
+        return;
+    }
+    if (std.fs.path.dirname(relative)) |parent| {
+        const parent_dir = try dir.createDirPathOpen(io, parent, .{});
+        defer parent_dir.close(io);
+        const out = try parent_dir.createFile(io, std.fs.path.basename(relative), .{ .truncate = true });
+        defer out.close(io);
+        var out_buf: [64 * 1024]u8 = undefined;
+        var writer = out.writer(io, &out_buf);
+        entry.extractTo(reader, &writer.interface) catch |err| switch (err) {
+            error.WriteFailed => return writer.err orelse error.WriteFailed,
+            else => return err,
+        };
+        try writer.interface.flush();
+        return;
+    }
+    const out = try dir.createFile(io, relative, .{ .truncate = true });
+    defer out.close(io);
+    var out_buf: [64 * 1024]u8 = undefined;
+    var writer = out.writer(io, &out_buf);
+    entry.extractTo(reader, &writer.interface) catch |err| switch (err) {
+        error.WriteFailed => return writer.err orelse error.WriteFailed,
+        else => return err,
+    };
+    try writer.interface.flush();
+}
+
+/// Create the Start-menu and Desktop shortcuts through WScript.Shell.
+///
+/// PowerShell is used instead of IShellLink COM: it is one call, works on every
+/// supported Windows version and keeps the installer a single small binary.
 fn create_shortcut() void {
-    var start_menu: [32768]u16 = undefined;
-    // CSIDL_COMMON_PROGRAMS = 0x0017, CSIDL_PROGRAMS = 0x0002
-    _ = win.SHGetFolderPathW(null, 0x0017, null, 0, &start_menu);
-    if (start_menu[0] == 0) _ = win.SHGetFolderPathW(null, 0x0002, null, 0, &start_menu);
-    if (start_menu[0] == 0) return;
-
-    var i: usize = 0;
-    while (start_menu[i] != 0) : (i += 1) {}
-    const start_menu_utf8 = std.unicode.utf16LeToUtf8Alloc(g_gpa, start_menu[0..i]) catch return;
-    const link_z = std.fmt.allocPrint(g_gpa, "{s}\\Zapret-Zen.lnk", .{start_menu_utf8}) catch return;
-
+    const targets = [_]struct { csidl: c_int, name: []const u8, fallback: c_int }{
+        // %ProgramData%\Microsoft\Windows\Start Menu\Programs
+        .{ .csidl = 0x0017, .name = "\\Zapret-Zen.lnk", .fallback = 0x0002 },
+        // %PUBLIC%\Desktop, then the per-user desktop
+        .{ .csidl = 0x0019, .name = "\\Zapret-Zen.lnk", .fallback = 0x0010 },
+    };
     const exe_utf8 = std.unicode.utf16LeToUtf8Alloc(g_gpa, g_install_dir.items) catch return;
     const exe = std.fmt.allocPrint(g_gpa, "{s}\\Zapret-Zen.exe", .{exe_utf8}) catch return;
-    const workdir = exe_utf8;
 
-    // PowerShell/WScript.Shell keeps this dependency-free and works on Win7+.
+    for (targets) |target| {
+        var folder: [32768]u16 = undefined;
+        _ = win.SHGetFolderPathW(null, target.csidl, null, 0, &folder);
+        if (folder[0] == 0) _ = win.SHGetFolderPathW(null, target.fallback, null, 0, &folder);
+        if (folder[0] == 0) continue;
+        var folder_len: usize = 0;
+        while (folder[folder_len] != 0) : (folder_len += 1) {}
+        const folder_utf8 = std.unicode.utf16LeToUtf8Alloc(g_gpa, folder[0..folder_len]) catch continue;
+        const link = std.fmt.allocPrint(g_gpa, "{s}{s}", .{ folder_utf8, target.name }) catch continue;
+        create_link_script(link, exe, exe_utf8);
+    }
+}
+
+fn create_link_script(link: []const u8, exe: []const u8, workdir: []const u8) void {
     const script = std.fmt.allocPrint(g_gpa,
-        \\$ErrorActionPreference='Stop';$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{s}');$s.TargetPath='{s}';$s.WorkingDirectory='{s}';$s.IconLocation='{s},0';$s.Description='Zapret-Zen';$s.Save()
-    , .{ link_z, exe, workdir, exe }) catch return;
+        \\$ErrorActionPreference='Stop';$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{s}');$s.TargetPath='{s}';$s.WorkingDirectory='{s}';$s.IconLocation='{s},0';$s.Description='Zapret-Zen - обход DPI';$s.Save()
+    , .{ link, exe, workdir, exe }) catch return;
 
     const cmd = std.fmt.allocPrint(g_gpa,
         \\powershell -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand {s}
@@ -496,6 +597,7 @@ fn worker(thread: std.Thread) void {
         if (g_hwnd) |hwnd| _ = win.PostMessageW(hwnd, WM_FAILED, 0, 0);
         return;
     };
+    clear_previous_install();
     extract_all(payload, g_install_utf8) catch |err| {
         g_error_text = switch (err) {
             error.AccessDenied, error.PermissionDenied => "Нет прав на запись в Program Files. Запустите установщик от имени администратора.",
@@ -509,6 +611,12 @@ fn worker(thread: std.Thread) void {
     create_shortcut();
     register_uninstall();
     g_state = .done;
+    if (g_silent) {
+        // Silent installs are usually followed by a manual launch; the GUI path
+        // honours the checkbox instead.
+        if (g_hwnd) |hwnd| _ = win.PostMessageW(hwnd, WM_FINISHED, 0, 0);
+        return;
+    }
     if (g_hwnd) |hwnd| _ = win.PostMessageW(hwnd, WM_FINISHED, 0, 0);
 }
 
@@ -528,8 +636,10 @@ fn start_install() void {
 }
 
 fn finish_ok() void {
-    set_control_text(g_status, "Готово. Zapret-Zen установлен.");
+    set_control_text(g_status, "Готово. Zapret-Zen установлен, ярлык добавлен на рабочий стол.");
     set_control_text(g_cancel_btn, "Закрыть");
+    // The checkbox is pre-ticked: a first-run launch is what users expect after
+    // pressing "Установить".
     if (g_launch_box) |b| _ = win.SendMessageW(b, BM_SETCHECK, @intCast(BST_CHECKED), 0);
     if (g_hwnd) |hwnd| _ = win.InvalidateRect(hwnd, null, 0);
 }

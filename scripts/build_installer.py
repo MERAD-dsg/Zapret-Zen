@@ -34,8 +34,11 @@ INSTALLER_ZIG = NATIVE / "installer" / "installer.zig"
 ICON = ROOT / "ui_assets" / "icons" / "app.ico"
 
 APP_NAME = "Zapret-Zen"
-VERSION = "2.1f"
-VERSION_QUAD = "2,1,0,0"
+VERSION = "2.1g"
+# Windows assembly identities need four *numeric* parts: "2.1f.0.0" makes the
+# loader reject the exe with "parallel configuration is incorrect" (0xc0150004).
+VERSION_ASSEMBLY = "2.1.1.0"
+VERSION_QUAD = VERSION_ASSEMBLY.replace(".", ",")
 
 
 def _find_zig() -> str:
@@ -67,7 +70,7 @@ def _write_rc(path: Path, exe_name: str, description: str) -> Path:
     manifest.write_text(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
         '<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">\n'
-        f'  <assemblyIdentity type="win32" name="ZapretZen.{exe_name}" version="{VERSION}.0.0"/>\n'
+        f'  <assemblyIdentity type="win32" name="ZapretZen.{exe_name}" version="{VERSION_ASSEMBLY}"/>\n'
         '  <dependency><dependentAssembly>\n'
         '    <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"'
         ' version="6.0.0.0" publicKeyToken="6595b64144ccf1df" language="*"/>\n'
@@ -94,11 +97,11 @@ def _write_rc(path: Path, exe_name: str, description: str) -> Path:
         f'    BLOCK "StringFileInfo"\n    BEGIN\n        BLOCK "041904B0"\n        BEGIN\n'
         f'            VALUE "CompanyName", "Zapret-Zen"\n'
         f'            VALUE "FileDescription", "{description}"\n'
-        f'            VALUE "FileVersion", "{VERSION}.0.0"\n'
+        f'            VALUE "FileVersion", "{VERSION_ASSEMBLY}"\n'
         f'            VALUE "InternalName", "{exe_name}"\n'
         f'            VALUE "OriginalFilename", "{exe_name}.exe"\n'
         f'            VALUE "ProductName", "Zapret-Zen"\n'
-        f'            VALUE "ProductVersion", "{VERSION}.0.0"\n'
+        f'            VALUE "ProductVersion", "{VERSION_ASSEMBLY}"\n'
         f'        END\n    END\n'
         f'    BLOCK "VarFileInfo"\n    BEGIN\n        VALUE "Translation", 0x419, 1200\n    END\n'
         f'END\n',
